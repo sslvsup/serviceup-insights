@@ -1,4 +1,6 @@
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { Runnable } from '@langchain/core/runnables';
+import type { ServiceResult, LineItemResult } from './schema';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { config } from '../config/env';
 import { invoiceParseSchema, InvoiceParseResult } from './schema';
@@ -11,16 +13,23 @@ const MODEL_PRO = 'gemini-2.5-pro';
 // Parses below this threshold are retried with Pro before being stored
 const CONFIDENCE_RETRY_THRESHOLD = 0.6;
 
-let _llmFlash: ReturnType<typeof buildLlm> | undefined;
-let _llmPro: ReturnType<typeof buildLlm> | undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type StructuredLlm = Runnable<any, InvoiceParseResult>;
 
-function buildLlm(model: string) {
+let _llmFlash: StructuredLlm | undefined;
+let _llmPro: StructuredLlm | undefined;
+
+function buildLlm(model: string): StructuredLlm {
   const base = new ChatGoogleGenerativeAI({
     model,
     temperature: 0,
     apiKey: config.gemini.apiKey,
+    maxOutputTokens: 65536, // large invoices produce long JSON; default ~8K is too small
   });
-  return base.withStructuredOutput(invoiceParseSchema);
+  // Cast via unknown: TS can't infer the return type of withStructuredOutput on
+  // deeply-nested Zod schemas (exceeds instantiation depth limit).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return base.withStructuredOutput(invoiceParseSchema as any) as StructuredLlm;
 }
 
 function getLlm(model: 'flash' | 'pro') {
@@ -114,10 +123,10 @@ export async function parseInvoicePdf(
   // Ensure required fields have defaults (LangChain structured output may not apply Zod defaults)
   const normalized: InvoiceParseResult = {
     ...result,
-    services: (result.services ?? []).map((s) => ({
+    services: (result.services ?? []).map((s: ServiceResult) => ({
       ...s,
       sort_order: s.sort_order ?? 0,
-      line_items: (s.line_items ?? []).map((li) => ({
+      line_items: (s.line_items ?? []).map((li: LineItemResult) => ({
         ...li,
         quantity: li.quantity ?? 1,
         sort_order: li.sort_order ?? 0,

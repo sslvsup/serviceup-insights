@@ -4,8 +4,6 @@ import { getNewInvoicesSince, getActiveFleetIds } from '../ingestion/mainDbClien
 import { processOne } from '../ingestion/batchRunner';
 import { generateAndCacheInsights } from '../intelligence/llmAnalyzer';
 import { logger } from '../utils/logger';
-import { config } from '../config/env';
-
 const PIPELINE_NAME = 'nightly_ingest';
 
 async function getLastSuccessAt(): Promise<Date> {
@@ -40,7 +38,7 @@ async function updatePipelineState(status: 'running' | 'success' | 'failed', met
 
 /**
  * Run the nightly pipeline:
- * 1. Ingest new invoices from BigQuery (via Metabase)
+ * 1. Ingest new invoices from BigQuery (via ADC)
  * 2. Parse them with Gemini
  * 3. Generate insights for all active fleets
  * 4. Expire stale insights
@@ -58,32 +56,28 @@ export async function runNightlyPipeline(): Promise<void> {
     let ingestCount = 0;
     let ingestFailed = 0;
 
-    if (config.metabase.url && config.metabase.apiKey) {
-      const newInvoices = await getNewInvoicesSince(lastSuccessAt);
-      logger.info(`Found ${newInvoices.length} new invoices to process`);
+    const newInvoices = await getNewInvoicesSince(lastSuccessAt);
+    logger.info(`Found ${newInvoices.length} new invoices to process`);
 
-      for (const inv of newInvoices) {
-        const result = await processOne({
-          requestId: Number(inv.id),
-          pdfUrl: String(inv.invoicepdfurl),
-          shopId: inv.shopid ? Number(inv.shopid) : null,
-          vehicleId: inv.vehicleid ? Number(inv.vehicleid) : null,
-          fleetId: inv.fleetid ? Number(inv.fleetid) : null,
-          shopName: inv.shop_name ? String(inv.shop_name) : null,
-          vehicleVin: inv.vin ? String(inv.vin) : null,
-          vehicleMake: inv.make ? String(inv.make) : null,
-          vehicleModel: inv.model ? String(inv.model) : null,
-          vehicleYear: inv.vehicle_year ? String(inv.vehicle_year) : null,
-        });
+    for (const inv of newInvoices) {
+      const result = await processOne({
+        requestId: Number(inv.id),
+        pdfUrl: String(inv.invoicepdfurl),
+        shopId: inv.shopid ? Number(inv.shopid) : null,
+        vehicleId: inv.vehicleid ? Number(inv.vehicleid) : null,
+        fleetId: inv.fleetid ? Number(inv.fleetid) : null,
+        shopName: inv.shop_name ? String(inv.shop_name) : null,
+        vehicleVin: inv.vin ? String(inv.vin) : null,
+        vehicleMake: inv.make ? String(inv.make) : null,
+        vehicleModel: inv.model ? String(inv.model) : null,
+        vehicleYear: inv.vehicle_year ? String(inv.vehicle_year) : null,
+      });
 
-        if (result.status === 'success') ingestCount++;
-        else if (result.status === 'failed') ingestFailed++;
-      }
-
-      logger.info('Ingest complete', { processed: ingestCount, failed: ingestFailed });
-    } else {
-      logger.warn('Metabase not configured — skipping new invoice ingestion');
+      if (result.status === 'success') ingestCount++;
+      else if (result.status === 'failed') ingestFailed++;
     }
+
+    logger.info('Ingest complete', { processed: ingestCount, failed: ingestFailed });
 
     // ── Step 2: Generate insights for all active fleets ────────────────────
     const prisma = getPrisma();

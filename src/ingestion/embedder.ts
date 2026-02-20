@@ -3,7 +3,9 @@ import { getPrisma } from '../db/prisma';
 import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
-const EMBED_MODEL = 'text-embedding-004';
+// gemini-embedding-001 is available via v1beta and produces 768-dim vectors (matches our vector(768) schema)
+// text-embedding-004 is not enabled for the serviceupaistudio project
+const EMBED_MODEL = 'gemini-embedding-001';
 
 let _genai: GoogleGenerativeAI | undefined;
 

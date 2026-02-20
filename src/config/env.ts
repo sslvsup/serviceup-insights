@@ -15,12 +15,6 @@ export const config = {
     url: required('DATABASE_URL'),
   },
 
-  metabase: {
-    url: optional('METABASE_URL', ''),
-    apiKey: optional('METABASE_API_KEY', ''),
-    databaseId: parseInt(optional('METABASE_DATABASE_ID', '34')),
-  },
-
   firebase: {
     serviceAccountKeyBase64: optional('SERVICE_ACCOUNT_JSON_BASE64', ''), // matches serviceup/Doppler convention
     serviceAccountKey: optional('FIREBASE_SERVICE_ACCOUNT_KEY', ''),      // raw JSON alternative

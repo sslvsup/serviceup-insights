@@ -136,8 +136,8 @@ model InvoiceEmbedding {
   parsedInvoiceId  Int    @map("parsed_invoice_id")
   chunkType        String @map("chunk_type") @db.VarChar(50)
   chunkText        String @map("chunk_text")
-  /// @pgvector.vector(768)
-  embedding        Unsupported("vector(768)")
+  /// @pgvector.vector(3072)
+  embedding        Unsupported("vector(3072)")
   metadata         Json   @default("{}") @map("metadata")
   createdAt        DateTime @default(now()) @map("created_at")
 

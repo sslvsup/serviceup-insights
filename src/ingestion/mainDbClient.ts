@@ -1,51 +1,22 @@
-import axios from 'axios';
-import { config } from '../config/env';
+import { BigQuery } from '@google-cloud/bigquery';
 import { logger } from '../utils/logger';
 
+const BQ_PROJECT = 'serviceupios';
 const DATASET = 'stitch__serviceup__prod_us';
 
-interface MetabaseQueryResult {
-  data: {
-    rows: unknown[][];
-    cols: { name: string }[];
-  };
-  error?: string;
-}
+// Uses Application Default Credentials (gcloud auth application-default login)
+// Matt granted Sam's Google account BigQuery read access on the serviceupios project.
+const bigquery = new BigQuery({ projectId: BQ_PROJECT });
 
 /**
- * Execute a native SQL query via Metabase API → BigQuery (Stitch replica).
+ * Execute a native SQL query directly against BigQuery via ADC.
  */
-async function queryViaMetabase(sql: string): Promise<Record<string, unknown>[]> {
-  const { url, apiKey, databaseId } = config.metabase;
+async function queryBigQuery(sql: string): Promise<Record<string, unknown>[]> {
+  logger.debug('Executing BigQuery query', { sqlPreview: sql.trim().slice(0, 120) });
 
-  if (!url || !apiKey) {
-    throw new Error('METABASE_URL and METABASE_API_KEY must be set to query main app data');
-  }
-
-  logger.debug('Executing Metabase query', { databaseId, sqlPreview: sql.slice(0, 100) });
-
-  const response = await axios.post<MetabaseQueryResult>(
-    `${url}/api/dataset`,
-    {
-      database: databaseId,
-      type: 'native',
-      native: { query: sql },
-    },
-    {
-      headers: { 'x-api-key': apiKey },
-      timeout: 120_000,
-    },
-  );
-
-  if (response.data.error) {
-    throw new Error(`Metabase query error: ${response.data.error}`);
-  }
-
-  const { cols, rows } = response.data.data;
-  const colNames = cols.map((c) => c.name);
-  return rows.map((row) =>
-    Object.fromEntries(colNames.map((name, i) => [name, row[i]])),
-  );
+  const [job] = await bigquery.createQueryJob({ query: sql, location: 'US' });
+  const [rows] = await job.getQueryResults();
+  return rows as Record<string, unknown>[];
 }
 
 export interface InvoiceRow {
@@ -69,10 +40,10 @@ const BASE_SELECT = `
          s.name AS shop_name,
          v.vin, v.make, v.model, v.year AS vehicle_year,
          f.name AS fleet_name
-  FROM \`${DATASET}.requests\` r
-  LEFT JOIN \`${DATASET}.shops\` s ON r.shopid = s.id
-  LEFT JOIN \`${DATASET}.vehicles\` v ON r.vehicleid = v.id
-  LEFT JOIN \`${DATASET}.fleets\` f ON r.fleetid = f.id
+  FROM \`${BQ_PROJECT}.${DATASET}.requests\` r
+  LEFT JOIN \`${BQ_PROJECT}.${DATASET}.shops\` s ON r.shopid = s.id
+  LEFT JOIN \`${BQ_PROJECT}.${DATASET}.vehicles\` v ON r.vehicleid = v.id
+  LEFT JOIN \`${BQ_PROJECT}.${DATASET}.fleets\` f ON r.fleetid = f.id
 `;
 
 /**
@@ -81,7 +52,7 @@ const BASE_SELECT = `
  */
 export async function getNewInvoicesSince(since: Date): Promise<InvoiceRow[]> {
   const sinceStr = since.toISOString();
-  const rows = await queryViaMetabase(`
+  const rows = await queryBigQuery(`
     ${BASE_SELECT}
     WHERE r.invoicepdfurl IS NOT NULL
       AND r._sdc_deleted_at IS NULL
@@ -96,7 +67,7 @@ export async function getNewInvoicesSince(since: Date): Promise<InvoiceRow[]> {
  * Used by the one-time initial backfill only (~26,757 rows).
  */
 export async function getAllInvoices(): Promise<InvoiceRow[]> {
-  const rows = await queryViaMetabase(`
+  const rows = await queryBigQuery(`
     ${BASE_SELECT}
     WHERE r.invoicepdfurl IS NOT NULL
       AND r._sdc_deleted_at IS NULL
@@ -109,14 +80,14 @@ export async function getAllInvoices(): Promise<InvoiceRow[]> {
  * Fetch all active fleet IDs from the platform.
  */
 export async function getActiveFleetIds(): Promise<number[]> {
-  const rows = await queryViaMetabase(`
+  const rows = await queryBigQuery(`
     SELECT DISTINCT fleetid
-    FROM \`${DATASET}.requests\`
+    FROM \`${BQ_PROJECT}.${DATASET}.requests\`
     WHERE fleetid IS NOT NULL
       AND _sdc_deleted_at IS NULL
     ORDER BY fleetid
   `);
-  return rows.map((r) => Number(r.fleetid)).filter(Boolean);
+  return rows.map((r) => Number(r['fleetid'])).filter(Boolean);
 }
 
 export interface FleetVehicleRow {
@@ -131,10 +102,10 @@ export interface FleetVehicleRow {
  * Fetch all fleet vehicles with VINs for NHTSA recall checks.
  */
 export async function getFleetVehicles(fleetId: number): Promise<FleetVehicleRow[]> {
-  const rows = await queryViaMetabase(`
+  const rows = await queryBigQuery(`
     SELECT v.id, v.vin, v.make, v.model, v.year AS vehicle_year
-    FROM \`${DATASET}.fleetVehicles\` fv
-    JOIN \`${DATASET}.vehicles\` v ON fv.vehicleid = v.id
+    FROM \`${BQ_PROJECT}.${DATASET}.fleetVehicles\` fv
+    JOIN \`${BQ_PROJECT}.${DATASET}.vehicles\` v ON fv.vehicleid = v.id
     WHERE fv.fleetid = ${fleetId}
       AND v.vin IS NOT NULL
   `);

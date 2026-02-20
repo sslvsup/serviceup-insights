@@ -22,9 +22,10 @@ export const config = {
   },
 
   firebase: {
-    serviceAccountKeyPath: optional('FIREBASE_SERVICE_ACCOUNT_KEY_PATH', ''),
-    serviceAccountKey: optional('FIREBASE_SERVICE_ACCOUNT_KEY', ''),
-    storageBucket: optional('FIREBASE_STORAGE_BUCKET', 'serviceupios.appspot.com'),
+    serviceAccountKeyBase64: optional('SERVICE_ACCOUNT_JSON_BASE64', ''), // matches serviceup/Doppler convention
+    serviceAccountKey: optional('FIREBASE_SERVICE_ACCOUNT_KEY', ''),      // raw JSON alternative
+    serviceAccountKeyPath: optional('FIREBASE_SERVICE_ACCOUNT_KEY_PATH', ''), // file path alternative
+    storageBucket: optional('STORAGE_BUCKET', optional('FIREBASE_STORAGE_BUCKET', 'serviceupios.appspot.com')),
   },
 
   gemini: {

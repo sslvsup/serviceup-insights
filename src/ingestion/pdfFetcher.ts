@@ -7,18 +7,23 @@ let _initialized = false;
 function initFirebase() {
   if (_initialized || admin.apps.length > 0) return;
 
-  const { serviceAccountKeyPath, serviceAccountKey, storageBucket } = config.firebase;
+  const { serviceAccountKeyBase64, serviceAccountKey, serviceAccountKeyPath, storageBucket } = config.firebase;
 
   let credential: admin.credential.Credential;
 
-  if (serviceAccountKey) {
-    // Inline JSON
+  if (serviceAccountKeyBase64) {
+    // Doppler convention: base64-encoded service account JSON (SERVICE_ACCOUNT_JSON_BASE64)
+    const sa = JSON.parse(Buffer.from(serviceAccountKeyBase64, 'base64').toString());
+    credential = admin.credential.cert(sa);
+  } else if (serviceAccountKey) {
+    // Inline raw JSON
     const sa = JSON.parse(serviceAccountKey);
     credential = admin.credential.cert(sa);
   } else if (serviceAccountKeyPath) {
+    // Path to a local JSON file
     credential = admin.credential.cert(serviceAccountKeyPath);
   } else {
-    // Fall back to application default credentials
+    // Fall back to application default credentials (e.g. Cloud Run, GKE workload identity)
     credential = admin.credential.applicationDefault();
   }
 

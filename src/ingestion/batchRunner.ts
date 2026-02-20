@@ -53,8 +53,8 @@ export async function processOne(item: BatchItem): Promise<BatchResult> {
     logger.info('Fetching PDF', { requestId, pdfUrl: pdfUrl.slice(0, 80) });
     const pdfBase64 = await fetchPdf(pdfUrl);
 
-    // 2. Parse with Gemini
-    const { result, elapsedMs } = await parseInvoicePdf(pdfBase64);
+    // 2. Parse with Gemini (Flash, with Pro fallback for low-confidence parses)
+    const { result, elapsedMs, model } = await parseInvoicePdf(pdfBase64);
 
     // 3. Normalize + store
     const record: InvoiceRecord = {
@@ -68,7 +68,7 @@ export async function processOne(item: BatchItem): Promise<BatchResult> {
       vehicleMake: item.vehicleMake,
       vehicleModel: item.vehicleModel,
       vehicleYear: item.vehicleYear,
-      llmModel: 'gemini-2.5-flash',
+      llmModel: model,
       elapsedMs,
     };
     const invoiceId = await normalizeAndStore(record, result);

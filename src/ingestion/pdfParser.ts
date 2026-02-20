@@ -5,22 +5,31 @@ import { invoiceParseSchema, InvoiceParseResult } from './schema';
 import { INVOICE_SYSTEM_PROMPT, SAMPLE_PDF_MESSAGE, PARSE_REQUEST_MESSAGE } from './systemPrompt';
 import { logger } from '../utils/logger';
 
-const MODEL = 'gemini-2.5-flash';
+const MODEL_FLASH = 'gemini-2.5-flash';
+const MODEL_PRO = 'gemini-2.5-pro';
 
-let _llm: ReturnType<typeof buildLlm> | undefined;
+// Parses below this threshold are retried with Pro before being stored
+const CONFIDENCE_RETRY_THRESHOLD = 0.6;
 
-function buildLlm() {
+let _llmFlash: ReturnType<typeof buildLlm> | undefined;
+let _llmPro: ReturnType<typeof buildLlm> | undefined;
+
+function buildLlm(model: string) {
   const base = new ChatGoogleGenerativeAI({
-    model: MODEL,
+    model,
     temperature: 0,
     apiKey: config.gemini.apiKey,
   });
   return base.withStructuredOutput(invoiceParseSchema);
 }
 
-function getLlm() {
-  if (!_llm) _llm = buildLlm();
-  return _llm;
+function getLlm(model: 'flash' | 'pro') {
+  if (model === 'pro') {
+    if (!_llmPro) _llmPro = buildLlm(MODEL_PRO);
+    return _llmPro;
+  }
+  if (!_llmFlash) _llmFlash = buildLlm(MODEL_FLASH);
+  return _llmFlash;
 }
 
 /**
@@ -33,9 +42,8 @@ function getLlm() {
 export async function parseInvoicePdf(
   pdfBase64: string,
   samplePdfBase64?: string,
-): Promise<{ result: InvoiceParseResult; elapsedMs: number }> {
+): Promise<{ result: InvoiceParseResult; elapsedMs: number; model: string }> {
   const startMs = Date.now();
-  const llm = getLlm();
 
   const systemMessage = new SystemMessage(INVOICE_SYSTEM_PROMPT);
 
@@ -78,12 +86,25 @@ export async function parseInvoicePdf(
     messages = [systemMessage, targetMessage];
   }
 
-  logger.debug('Invoking Gemini PDF parser');
+  logger.debug('Invoking Gemini PDF parser (flash)');
 
-  const result = await llm.invoke(messages);
+  let result = await getLlm('flash').invoke(messages);
+  let usedModel = MODEL_FLASH;
+
+  // Low-confidence parse — retry with Pro before storing potentially bad data
+  if ((result.parse_confidence ?? 1) < CONFIDENCE_RETRY_THRESHOLD) {
+    logger.info('Low confidence parse, retrying with Pro', {
+      confidence: result.parse_confidence,
+      threshold: CONFIDENCE_RETRY_THRESHOLD,
+    });
+    result = await getLlm('pro').invoke(messages);
+    usedModel = MODEL_PRO;
+  }
+
   const elapsedMs = Date.now() - startMs;
 
   logger.debug('Gemini parse complete', {
+    model: usedModel,
     elapsedMs,
     isValid: result.is_valid_invoice,
     confidence: result.parse_confidence,
@@ -106,5 +127,5 @@ export async function parseInvoicePdf(
     extras: result.extras ?? [],
   } as InvoiceParseResult;
 
-  return { result: normalized, elapsedMs };
+  return { result: normalized, elapsedMs, model: usedModel };
 }

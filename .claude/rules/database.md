@@ -37,6 +37,16 @@ Never use `prisma.invoiceEmbedding.create()` or similar — Prisma can't handle 
 - Use tagged template literals (`` $queryRaw`...` ``) not `$queryRawUnsafe` — the latter disables parameterization
 - Date params: pass as `Date` objects or ISO strings directly — Prisma handles the pg cast
 
+## migrate dev and the HNSW Index
+
+The HNSW index on `invoice_embeddings.embedding` is created by a raw SQL migration but is NOT
+declared in `schema.prisma` (Prisma can't represent the `vector` type). This means:
+
+- Running `migrate dev` on an already up-to-date DB will ask for a migration name — **press Ctrl+C**.
+  Prisma is seeing the index as drift and would generate a migration to DROP it.
+- Only run `migrate dev` after making actual changes to `schema.prisma`.
+- To reset the dev DB cleanly: `prisma migrate reset` (applies all migrations incl. HNSW index).
+
 ## Pagination
 
 When paginating over a set that shrinks as items are processed (e.g., `parseStatus: 'pending'`):

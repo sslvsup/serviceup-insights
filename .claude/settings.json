@@ -1,0 +1,59 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)",
+      "Bash(npx prisma generate)",
+      "Bash(npx prisma migrate dev*)",
+      "Bash(npx prisma migrate deploy)",
+      "Bash(npx prisma studio)",
+      "Bash(npx prisma db push)",
+      "Bash(npx prisma format)",
+      "Bash(npx prisma validate)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git add *)",
+      "Bash(git stash list)",
+      "Bash(docker compose ps)",
+      "Bash(docker compose logs*)",
+      "Bash(docker compose up*)",
+      "Bash(node *)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)",
+      "Bash(git rebase*)",
+      "Bash(git cherry-pick*)",
+      "Bash(docker compose down*)",
+      "Bash(docker system prune*)",
+      "Bash(rm -rf*)",
+      "Bash(sudo *)",
+      "Bash(chmod 777*)",
+      "Bash(curl * | bash*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/typecheck.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/prisma-check.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

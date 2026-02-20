@@ -188,29 +188,91 @@ Prisma uses `Unsupported("vector(768)")` — all operations via `$queryRaw` / `$
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
 | `DATABASE_URL` | ✅ | — | Must use port 5433 locally |
-| `GEMINI_API_KEY` | ✅ | — | Used for parsing + embeddings + insights |
+| `GEMINI_API_KEY` | ✅ | — | From `serviceupaistudio` GCP project |
 | `EMBED_SECRET` | ✅ | placeholder | JWT signing secret — **change in prod** |
 | `API_KEY` | ✅ | — | Unset = open (logs warning) |
-| `FIREBASE_SERVICE_ACCOUNT_KEY` | ✅ | — | Inline JSON or path variant |
-| `FIREBASE_STORAGE_BUCKET` | — | serviceupios.appspot.com | |
+| `SERVICE_ACCOUNT_JSON_BASE64` | — | — | Firebase service account (base64 JSON). Not needed locally if using ADC |
+| `STORAGE_BUCKET` | — | serviceupios.appspot.com | |
 | `METABASE_URL` | — | — | Omit to skip nightly ingest |
 | `METABASE_API_KEY` | — | — | |
 | `METABASE_DATABASE_ID` | — | 34 | BigQuery dataset ID in Metabase |
 | `PORT` | — | 4050 | |
 | `INSIGHTS_BATCH_SIZE` | — | 10 | PDFs processed per batch |
 
+**Firebase credential resolution order** (first match wins):
+1. `SERVICE_ACCOUNT_JSON_BASE64` — base64-encoded JSON (Doppler/prod convention)
+2. `FIREBASE_SERVICE_ACCOUNT_KEY` — raw inline JSON
+3. `FIREBASE_SERVICE_ACCOUNT_KEY_PATH` — path to local JSON file
+4. Application Default Credentials — `gcloud auth application-default login` (local dev) or workload identity (Cloud Run)
+
+---
+
+## Local Development
+
+### First-time setup
+
+```bash
+# 1. Authenticate with GCP (gives Firebase Storage read access via ADC)
+gcloud auth application-default login
+# → log in with your serviceup Google account
+
+# 2. Start local Postgres on port 5433
+docker compose up postgres -d
+
+# 3. Create .env with minimum required vars
+echo "DATABASE_URL=postgresql://insights:insights@localhost:5433/serviceup_insights" > .env
+echo "GEMINI_API_KEY=<your key from serviceupaistudio>" >> .env
+
+# 4. Run migrations and start
+npm run db:migrate:dev
+npm run dev
+# → http://localhost:4050
+
+# 5. Smoke test
+curl localhost:4050/api/v1/health
+```
+
+**Or with Doppler** (once `serviceup-insights/dev` config is created):
+```bash
+doppler run -- npm run dev
+```
+
+### What does and doesn't auto-run
+
+**The server does NOT process PDFs on startup.** The nightly cron runs at 11pm UTC only.
+
+| Command | Effect | Cost |
+|---------|--------|------|
+| `npm run dev` | Starts server only | Free |
+| `npm run backfill -- --limit 10` | Parses 10 invoices — safe for testing | ~$0.01 |
+| `npm run backfill` | Parses all ~9,000 historic invoices | ~$5–10 |
+| `npm run pipeline` | Ingest new + generate insights (no bulk parsing) | Low |
+| `POST /api/v1/widgets/generate` | Insights for one fleet (no PDF parsing) | Low |
+
+### End-to-end test run
+
+```bash
+# Parse 10 invoices to exercise the full pipeline
+npm run backfill -- --limit 10
+
+# Inspect results in Prisma Studio
+npm run db:studio   # → localhost:5555, check parsed_invoices table
+
+# Generate insights for a fleet that has parsed invoices
+curl -X POST "localhost:4050/api/v1/widgets/generate?fleetId=<id>" \
+  -H "x-api-key: <API_KEY>"
+
+# View widgets as JSON
+curl "localhost:4050/api/v1/widgets?fleetId=<id>" \
+  -H "x-api-key: <API_KEY>"
+```
+
 ---
 
 ## Deployment
 
 ```bash
-# Local dev (DB only via Docker)
-docker compose up postgres -d
-cp .env.example .env          # fill in credentials
-npm run db:migrate:dev
-npm run dev
-
-# Full Docker stack
+# Full Docker stack (local)
 docker compose up -d
 docker compose logs -f insights
 
@@ -220,6 +282,11 @@ docker compose -f docker-compose.yml up -d
 
 Multi-stage Dockerfile: builder (node:22-alpine, compiles TS) → runtime (prod deps only, ~200MB).
 Container: port 4050, restarts unless-stopped, waits for postgres healthcheck.
+
+**Production Firebase auth:** When deployed (e.g. Cloud Run / "nano banana"), the platform generates
+a service account automatically. DevOps grants that service account `Storage Object Viewer` on the
+`serviceupios.appspot.com` bucket, and the app picks it up via Application Default Credentials —
+no `SERVICE_ACCOUNT_JSON_BASE64` needed in prod either.
 
 ---
 

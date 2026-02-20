@@ -2,9 +2,8 @@
  * backfill.ts — One-time: parse all historical invoices
  *
  * Usage:
- *   yarn backfill
- *   # or
- *   npx tsx src/scripts/backfill.ts
+ *   npm run backfill                  # process everything
+ *   npm run backfill -- --limit 10    # process only 10 (for testing)
  *
  * This script:
  * 1. Fetches all requests with invoice PDFs from BigQuery (via Metabase API)
@@ -21,9 +20,19 @@ import { processOne } from '../ingestion/batchRunner';
 import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
+// Parse --limit N from argv
+const limitArg = process.argv.indexOf('--limit');
+const LIMIT = limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : null;
+
 async function backfill() {
   const prisma = getPrisma();
   const PIPELINE_NAME = 'backfill';
+
+  if (LIMIT) {
+    logger.info(`=== Starting backfill (TEST MODE: limit ${LIMIT}) ===`);
+  } else {
+    logger.info('=== Starting backfill (full) ===');
+  }
 
   await prisma.pipelineState.upsert({
     where: { pipelineName: PIPELINE_NAME },
@@ -31,11 +40,9 @@ async function backfill() {
     update: { lastRunAt: new Date(), lastStatus: 'running', updatedAt: new Date() },
   });
 
-  logger.info('=== Starting backfill ===');
-
   // Get all invoices from main DB
-  logger.info('Fetching all invoices from BigQuery via Metabase...');
-  const allInvoices = await getAllInvoices();
+  logger.info('Fetching invoices from BigQuery via Metabase...');
+  let allInvoices = await getAllInvoices();
   logger.info(`Total invoices in main DB: ${allInvoices.length}`);
 
   // Get already-processed request IDs
@@ -45,8 +52,14 @@ async function backfill() {
   });
   const processedIds = new Set(processed.map((p) => p.requestId));
 
-  const remaining = allInvoices.filter((inv) => !processedIds.has(Number(inv.id)));
+  let remaining = allInvoices.filter((inv) => !processedIds.has(Number(inv.id)));
   logger.info(`Remaining to process: ${remaining.length} (${processedIds.size} already done)`);
+
+  // Apply limit (slices the todo list — does not affect already-processed records)
+  if (LIMIT) {
+    remaining = remaining.slice(0, LIMIT);
+    logger.info(`Limiting run to ${remaining.length} invoices`);
+  }
 
   // Insert all remaining as 'pending' first (so progress is visible in DB)
   logger.info('Inserting pending records...');
@@ -75,17 +88,16 @@ async function backfill() {
   }
   logger.info(`Inserted ${pendingInserted} pending records`);
 
-  // Now process in batches
+  // Process in batches — always re-fetch from skip:0 since processed items
+  // leave the 'pending' set naturally (incrementing offset would skip rows)
   const batchSize = config.processing.batchSize;
   let totalProcessed = 0;
   let totalFailed = 0;
-  let offset = 0;
 
   while (true) {
     const pending = await prisma.parsedInvoice.findMany({
       where: { parseStatus: 'pending' },
       take: batchSize,
-      skip: offset,
       orderBy: { requestId: 'asc' },
     });
 
@@ -106,10 +118,11 @@ async function backfill() {
       else if (result.status === 'failed') totalFailed++;
     }
 
-    const pct = ((totalProcessed + totalFailed) / pendingInserted * 100).toFixed(1);
-    logger.info(`Progress: ${totalProcessed + totalFailed}/${pendingInserted} (${pct}%) — success: ${totalProcessed}, failed: ${totalFailed}`);
+    const total = totalProcessed + totalFailed;
+    const pct = pendingInserted > 0 ? (total / pendingInserted * 100).toFixed(1) : '0.0';
+    logger.info(`Progress: ${total}/${pendingInserted} (${pct}%) — success: ${totalProcessed}, failed: ${totalFailed}`);
 
-    // Update progress
+    // Update progress checkpoint
     await prisma.pipelineState.update({
       where: { pipelineName: PIPELINE_NAME },
       data: {
@@ -118,8 +131,6 @@ async function backfill() {
         updatedAt: new Date(),
       },
     });
-
-    offset += batchSize;
   }
 
   await prisma.pipelineState.update({

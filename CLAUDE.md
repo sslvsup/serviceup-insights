@@ -3,6 +3,39 @@
 PDF ingestion + LLM analytics service that extracts structured data from shop invoices,
 generates AI-powered fleet insights, and serves embeddable iframe widgets for sa_portal.
 
+## Local Dev Setup (first time)
+
+```bash
+# 1. Authenticate with GCP — gives Firebase Storage read access via ADC
+gcloud auth application-default login
+# → browser opens, log in with your serviceup Google account
+
+# 2. Start local Postgres (port 5433)
+docker compose up postgres -d
+
+# 3. Run migrations
+npm run db:migrate:dev
+
+# 4. Start the server
+npm run dev
+# → http://localhost:4050
+
+# 5. Smoke test
+curl localhost:4050/api/v1/health
+```
+
+**Minimum `.env` for local dev:**
+```
+DATABASE_URL=postgresql://insights:insights@localhost:5433/serviceup_insights
+GEMINI_API_KEY=<key from serviceupaistudio AI Studio project>
+```
+Firebase Storage works automatically via `gcloud auth application-default login` — no key file needed.
+
+**Or with Doppler** (once `serviceup-insights/dev` config exists):
+```bash
+doppler run -- npm run dev
+```
+
 ## Commands
 
 ```bash
@@ -15,9 +48,43 @@ npm run db:migrate:dev   # create + apply migration (dev)
 npm run db:migrate       # deploy migrations (prod)
 npm run db:studio        # Prisma Studio GUI at localhost:5555
 
-npm run pipeline         # run nightly pipeline manually
-npm run backfill         # resumable backfill of all historic invoices
+npm run pipeline         # run nightly pipeline manually (no PDF parsing)
+npm run backfill         # full backfill — ALL ~9,000 historic invoices
+npm run backfill -- --limit 10   # TEST MODE — process only 10 invoices
 npm run seed             # import from Google Sheet CSV
+```
+
+## What Triggers PDF Processing
+
+**The server does NOT auto-process PDFs on startup.** The nightly cron fires at 11pm UTC only.
+
+| Trigger | What it does |
+|---------|-------------|
+| `npm run backfill -- --limit 10` | Safe test — parse 10 invoices end-to-end |
+| `npm run backfill` | Full run — all ~9,000 historic invoices (costs $) |
+| `npm run pipeline` | Nightly job — ingest new + generate insights (no bulk parsing) |
+| `POST /api/v1/widgets/generate?fleetId=X` | Generate insights for one fleet (no PDF parsing) |
+
+## End-to-End Test Workflow (first run)
+
+```bash
+# 1. Bring up DB + server
+docker compose up postgres -d
+npm run db:migrate:dev
+npm run dev
+
+# 2. Parse 10 invoices to verify the pipeline works
+npm run backfill -- --limit 10
+
+# 3. Check the DB has parsed records
+npm run db:studio   # open Prisma Studio → inspect parsed_invoices table
+
+# 4. Trigger insight generation for a fleet that has parsed invoices
+curl -X POST "localhost:4050/api/v1/widgets/generate?fleetId=<id>" \
+  -H "x-api-key: <API_KEY>"
+
+# 5. View the embed dashboard
+curl "localhost:4050/embed/dashboard?fleetId=<id>&token=<embed_token>"
 ```
 
 ## Architecture (5 layers)
@@ -38,6 +105,14 @@ src/
 - `src/ingestion/schema.ts` — Zod schema for LLM output (source of truth for invoice shape)
 - `src/metrics/metrics.ts` — all analytics queries (add new metrics here)
 - `prisma/schema.prisma` — DB models + pgvector extension
+
+## Gemini Model Strategy
+
+PDF parsing uses **Flash first, Pro fallback**:
+- `gemini-2.5-flash` — used for all parses (fast, cheap)
+- `gemini-2.5-pro` — automatic fallback when `parse_confidence < 0.6` (blurry scans etc.)
+- `llm_model` column on `parsed_invoices` records which model was actually used
+- API key comes from the `serviceupaistudio` GCP project
 
 ## Critical Gotchas
 

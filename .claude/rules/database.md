@@ -8,7 +8,9 @@
 
 ## pgvector
 
-The `invoice_embeddings` table uses `vector(768)` which Prisma does not natively support.
+The `invoice_embeddings` table uses `vector(3072)` which Prisma does not natively support.
+Embedding model: `gemini-embedding-001` (3072 dims) — available on `serviceupaistudio` API key via v1beta.
+No HNSW index currently: pgvector HNSW max is 2000 dims for `vector` type. For production, use `halfvec(3072)` + `halfvec_cosine_ops` (pgvector 0.7.0+, which we have).
 
 **All vector operations use raw SQL:**
 ```typescript
@@ -37,15 +39,12 @@ Never use `prisma.invoiceEmbedding.create()` or similar — Prisma can't handle 
 - Use tagged template literals (`` $queryRaw`...` ``) not `$queryRawUnsafe` — the latter disables parameterization
 - Date params: pass as `Date` objects or ISO strings directly — Prisma handles the pg cast
 
-## migrate dev and the HNSW Index
-
-The HNSW index on `invoice_embeddings.embedding` is created by a raw SQL migration but is NOT
-declared in `schema.prisma` (Prisma can't represent the `vector` type). This means:
+## migrate dev caution
 
 - Running `migrate dev` on an already up-to-date DB will ask for a migration name — **press Ctrl+C**.
-  Prisma is seeing the index as drift and would generate a migration to DROP it.
 - Only run `migrate dev` after making actual changes to `schema.prisma`.
-- To reset the dev DB cleanly: `prisma migrate reset` (applies all migrations incl. HNSW index).
+- To reset the dev DB cleanly: `prisma migrate reset`.
+- Use `prisma migrate deploy` (not `migrate dev`) to apply manually-created migration SQL files.
 
 ## Pagination
 

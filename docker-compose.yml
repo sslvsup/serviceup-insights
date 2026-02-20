@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: serviceup_insights
+      POSTGRES_USER: insights
+      POSTGRES_PASSWORD: insights
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insights -d serviceup_insights"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  insights:
+    build: .
+    ports:
+      - "4050:4050"
+    environment:
+      DATABASE_URL: postgresql://insights:insights@postgres:5432/serviceup_insights
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      EMBED_SECRET: ${EMBED_SECRET:-dev-secret-change-in-prod}
+      PORT: 4050
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

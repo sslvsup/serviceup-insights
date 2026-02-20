@@ -1,0 +1,162 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+model ParsedInvoice {
+  id     Int    @id @default(autoincrement())
+
+  // Relational core
+  requestId         Int     @map("request_id")
+  shopId            Int?    @map("shop_id")
+  vehicleId         Int?    @map("vehicle_id")
+  fleetId           Int?    @map("fleet_id")
+  pdfUrl            String  @map("pdf_url")
+  pdfType           String? @map("pdf_type") @db.VarChar(50)
+  parseStatus       String  @default("pending") @map("parse_status") @db.VarChar(20)
+
+  // Promoted fields for filtering/aggregation
+  invoiceDate       DateTime? @map("invoice_date") @db.Date
+  grandTotalCents   Int?      @map("grand_total_cents")
+  laborTotalCents   Int?      @map("labor_total_cents")
+  partsTotalCents   Int?      @map("parts_total_cents")
+  taxAmountCents    Int?      @map("tax_amount_cents")
+  pdfShopName       String?   @map("pdf_shop_name") @db.VarChar(500)
+  pdfVin            String?   @map("pdf_vin") @db.VarChar(20)
+  paymentTerms      String?   @map("payment_terms") @db.VarChar(100)
+
+  // JSONB columns
+  extractedData     Json    @default("{}") @map("extracted_data")
+  parseMeta         Json?   @map("parse_meta")
+  rawLlmResponse    Json?   @map("raw_llm_response")
+  rawExtractedText  String? @map("raw_extracted_text")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  // Relations
+  services   ParsedInvoiceService[]
+  lineItems  ParsedInvoiceLineItem[]
+  embeddings InvoiceEmbedding[]
+
+  @@unique([requestId, pdfUrl])
+  @@index([requestId])
+  @@index([shopId])
+  @@index([fleetId])
+  @@index([parseStatus])
+  @@index([invoiceDate])
+  @@map("parsed_invoices")
+}
+
+model ParsedInvoiceService {
+  id               Int    @id @default(autoincrement())
+  parsedInvoiceId  Int    @map("parsed_invoice_id")
+  serviceName      String? @map("service_name") @db.VarChar(500)
+  serviceData      Json   @default("{}") @map("service_data")
+  sortOrder        Int    @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  // Relations
+  invoice   ParsedInvoice          @relation(fields: [parsedInvoiceId], references: [id], onDelete: Cascade)
+  lineItems ParsedInvoiceLineItem[]
+
+  @@index([parsedInvoiceId])
+  @@map("parsed_invoice_services")
+}
+
+model ParsedInvoiceLineItem {
+  id               Int     @id @default(autoincrement())
+  parsedInvoiceId  Int     @map("parsed_invoice_id")
+  parsedServiceId  Int?    @map("parsed_service_id")
+
+  // Core queryable fields
+  itemType         String  @map("item_type") @db.VarChar(50)
+  name             String  @db.VarChar(500)
+  quantity         Decimal @default(1) @db.Decimal(8, 2)
+  unitPriceCents   Int?    @map("unit_price_cents")
+  totalPriceCents  Int?    @map("total_price_cents")
+
+  // Type-specific JSONB
+  itemData         Json    @default("{}") @map("item_data")
+
+  sortOrder        Int     @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  // Relations
+  invoice  ParsedInvoice        @relation(fields: [parsedInvoiceId], references: [id], onDelete: Cascade)
+  service  ParsedInvoiceService? @relation(fields: [parsedServiceId], references: [id], onDelete: SetNull)
+
+  @@index([parsedInvoiceId])
+  @@index([itemType])
+  @@index([name])
+  @@map("parsed_invoice_line_items")
+}
+
+model InsightCache {
+  id          Int     @id @default(autoincrement())
+
+  fleetId     Int?    @map("fleet_id")
+  shopId      Int?    @map("shop_id")
+
+  insightType String  @map("insight_type") @db.VarChar(100)
+  insightKey  String? @unique @map("insight_key") @db.VarChar(255)
+
+  title       String  @db.VarChar(500)
+  summary     String
+  detailJson  Json    @map("detail_json")
+
+  widgetType  String? @map("widget_type") @db.VarChar(50)
+  widgetConfig Json?  @map("widget_config")
+
+  validFrom   DateTime @default(now()) @map("valid_from")
+  validUntil  DateTime? @map("valid_until")
+
+  priority    Int     @default(3)
+  audience    String  @default("all") @db.VarChar(50)
+
+  generatedByModel String? @map("generated_by_model") @db.VarChar(100)
+  savingsEstimateCents Int? @map("savings_estimate_cents")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([fleetId])
+  @@index([insightType])
+  @@map("insight_cache")
+}
+
+model InvoiceEmbedding {
+  id               Int    @id @default(autoincrement())
+  parsedInvoiceId  Int    @map("parsed_invoice_id")
+  chunkType        String @map("chunk_type") @db.VarChar(50)
+  chunkText        String @map("chunk_text")
+  /// @pgvector.vector(768)
+  embedding        Unsupported("vector(768)")
+  metadata         Json   @default("{}") @map("metadata")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  invoice ParsedInvoice @relation(fields: [parsedInvoiceId], references: [id], onDelete: Cascade)
+
+  @@index([parsedInvoiceId])
+  @@index([chunkType])
+  @@map("invoice_embeddings")
+}
+
+model PipelineState {
+  id               Int       @id @default(autoincrement())
+  pipelineName     String    @unique @map("pipeline_name") @db.VarChar(50)
+  lastSuccessAt    DateTime? @map("last_success_at")
+  lastRunAt        DateTime? @map("last_run_at")
+  lastStatus       String?   @map("last_status") @db.VarChar(20)
+  recordsProcessed Int       @default(0) @map("records_processed")
+  metadata         Json      @default("{}") @map("metadata")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@map("pipeline_state")
+}

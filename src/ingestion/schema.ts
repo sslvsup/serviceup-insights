@@ -1,15 +1,17 @@
 import { z } from 'zod';
 
 const lineItemSchema = z.object({
+  // .catch('unknown') maps any LLM-invented type (e.g. "paint") to 'unknown' rather than failing
   item_type: z.enum([
     'labor', 'part', 'fee', 'shop_supply', 'hazmat', 'environmental',
     'sublet', 'tire', 'fluid', 'filter', 'discount', 'tax', 'misc', 'unknown',
-  ]),
-  name: z.string(),
+  ]).catch('unknown'),
+  // name is required in domain logic but the LLM occasionally omits it
+  name: z.string().optional().default('Unknown'),
   description: z.string().optional(),
 
   // Pricing
-  quantity: z.number().default(1),
+  quantity: z.number().optional().default(1),
   unit_price: z.number().optional(),
   total_price: z.number().optional(),
 
@@ -44,10 +46,10 @@ const lineItemSchema = z.object({
   operation_type: z.string().optional(),
   repair_area: z.string().optional(),
 
-  is_sublet: z.boolean().default(false),
+  is_sublet: z.boolean().optional().default(false),
   sublet_vendor: z.string().optional(),
 
-  sort_order: z.number().default(0),
+  sort_order: z.number().optional().default(0),
 });
 
 const serviceSchema = z.object({
@@ -62,20 +64,24 @@ const serviceSchema = z.object({
   is_declined: z.boolean().optional(),
   completion_date: z.string().optional(),
   service_subtotal: z.number().optional(),
-  line_items: z.array(lineItemSchema).default([]),
-  sort_order: z.number().default(0),
+  line_items: z.array(lineItemSchema).optional().default([]),
+  sort_order: z.number().optional().default(0),
 });
 
 const extraFieldSchema = z.object({
   field_name: z.string(),
-  field_value: z.string(),
-  field_category: z.enum(['shop', 'vehicle', 'customer', 'financial', 'service', 'misc']).default('misc'),
+  // The LLM sometimes returns null or a number — coerce everything to string
+  field_value: z.coerce.string().optional().default(''),
+  // .catch('misc') silently maps any LLM-invented category (e.g. "dates") to 'misc'
+  field_category: z.enum(['shop', 'vehicle', 'customer', 'financial', 'service', 'misc'])
+    .catch('misc'),
   source_location: z.string().optional(),
 });
 
 export const invoiceParseSchema = z.object({
-  is_valid_invoice: z.boolean(),
-  parse_confidence: z.number().min(0).max(1),
+  // These two are semantically required but the LLM occasionally omits them
+  is_valid_invoice: z.boolean().optional().default(true),
+  parse_confidence: z.number().min(0).max(1).optional().default(0.5),
 
   // Document IDs
   invoice_number: z.string().optional(),
@@ -151,7 +157,7 @@ export const invoiceParseSchema = z.object({
   // Approval
   approved_by: z.string().optional(),
   approved_at: z.string().optional(),
-  customer_signature_present: z.boolean().default(false),
+  customer_signature_present: z.boolean().optional().default(false),
 
   // Terms
   warranty_text: z.string().optional(),
@@ -159,15 +165,30 @@ export const invoiceParseSchema = z.object({
   notes: z.string().optional(),
 
   // Structured data
-  services: z.array(serviceSchema).default([]),
+  services: z.array(serviceSchema).optional().default([]),
 
   // Catch-all for any fields not in the schema
-  extras: z.array(extraFieldSchema).default([]),
+  extras: z.array(extraFieldSchema).optional().default([]),
 
-  // Full text for backup + pgvector embedding
-  raw_text: z.string(),
+  // Full text for backup + pgvector embedding; truncated in parseAndNormalize to 8000 chars
+  raw_text: z.string().optional().default(''),
 });
 
 export type InvoiceParseResult = z.infer<typeof invoiceParseSchema>;
 export type ServiceResult = z.infer<typeof serviceSchema>;
 export type LineItemResult = z.infer<typeof lineItemSchema>;
+
+/**
+ * Recursively converts all null values to undefined before Zod parsing.
+ * Gemini returns null for absent optional fields; our schema uses .optional() not .nullable().
+ */
+export function coerceNulls(value: unknown): unknown {
+  if (value === null) return undefined;
+  if (Array.isArray(value)) return value.map(coerceNulls);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, coerceNulls(v)]),
+    );
+  }
+  return value;
+}

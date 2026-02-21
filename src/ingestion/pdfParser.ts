@@ -1,10 +1,8 @@
-import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { Runnable } from '@langchain/core/runnables';
+import { GoogleGenerativeAI, Content } from '@google/generative-ai';
 import type { ServiceResult, LineItemResult } from './schema';
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-import { config } from '../config/env';
-import { invoiceParseSchema, InvoiceParseResult } from './schema';
+import { invoiceParseSchema, coerceNulls, InvoiceParseResult } from './schema';
 import { INVOICE_SYSTEM_PROMPT, SAMPLE_PDF_MESSAGE, PARSE_REQUEST_MESSAGE } from './systemPrompt';
+import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
 const MODEL_FLASH = 'gemini-2.5-flash';
@@ -13,40 +11,99 @@ const MODEL_PRO = 'gemini-2.5-pro';
 // Parses below this threshold are retried with Pro before being stored
 const CONFIDENCE_RETRY_THRESHOLD = 0.6;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type StructuredLlm = Runnable<any, InvoiceParseResult>;
+let _genai: GoogleGenerativeAI | undefined;
 
-let _llmFlash: StructuredLlm | undefined;
-let _llmPro: StructuredLlm | undefined;
-
-function buildLlm(model: string): StructuredLlm {
-  const base = new ChatGoogleGenerativeAI({
-    model,
-    temperature: 0,
-    apiKey: config.gemini.apiKey,
-    maxOutputTokens: 65536, // large invoices produce long JSON; default ~8K is too small
-  });
-  // Cast via unknown: TS can't infer the return type of withStructuredOutput on
-  // deeply-nested Zod schemas (exceeds instantiation depth limit).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return base.withStructuredOutput(invoiceParseSchema as any) as StructuredLlm;
+function getGenai() {
+  if (!_genai) _genai = new GoogleGenerativeAI(config.gemini.apiKey);
+  return _genai;
 }
 
-function getLlm(model: 'flash' | 'pro') {
-  if (model === 'pro') {
-    if (!_llmPro) _llmPro = buildLlm(MODEL_PRO);
-    return _llmPro;
+function getModel(modelName: string) {
+  return getGenai().getGenerativeModel(
+    {
+      model: modelName,
+      systemInstruction: INVOICE_SYSTEM_PROMPT,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        // No responseSchema — we let the system prompt guide structure and parse with Zod.
+        // Sending responseSchema through LangChain caused consistent JSON truncation at ~16K tokens
+        // because the SDK defaulted to a lower output limit in schema mode.
+        maxOutputTokens: 65536,
+        temperature: 0,
+      },
+    },
+  );
+}
+
+async function invokeModel(
+  modelName: string,
+  pdfBase64: string,
+  samplePdfBase64?: string,
+): Promise<string> {
+  const model = getModel(modelName);
+
+  let history: Content[] = [];
+
+  if (samplePdfBase64) {
+    // 3-turn: sample PDF → ack → target PDF
+    history = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'application/pdf', data: samplePdfBase64 } },
+          { text: SAMPLE_PDF_MESSAGE },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'I have reviewed the sample automotive repair invoice and am ready to extract data from your invoice in the same structured format.' }],
+      },
+    ];
   }
-  if (!_llmFlash) _llmFlash = buildLlm(MODEL_FLASH);
-  return _llmFlash;
+
+  const chat = model.startChat({ history });
+  const result = await chat.sendMessage([
+    { inlineData: { mimeType: 'application/pdf', data: pdfBase64 } },
+    { text: PARSE_REQUEST_MESSAGE },
+  ]);
+
+  return result.response.text();
+}
+
+function parseAndNormalize(jsonText: string): InvoiceParseResult {
+  let raw = JSON.parse(jsonText);
+  // Some models occasionally wrap the result in a single-element array
+  if (Array.isArray(raw) && raw.length === 1) raw = raw[0];
+  // Gemini returns null for absent optional fields; coerce null → undefined so
+  // Zod .optional() fields accept them (we don't use .nullable() in the schema).
+  const parsed = invoiceParseSchema.parse(coerceNulls(raw));
+
+  // Ensure Zod .default() values are applied (they may not fire when parsing raw LLM output)
+  // Also hard-cap raw_text — the LLM ignores maxLength hints
+  return {
+    ...parsed,
+    raw_text: (parsed.raw_text ?? '').slice(0, 8000),
+    services: (parsed.services ?? []).map((s: ServiceResult) => ({
+      ...s,
+      sort_order: s.sort_order ?? 0,
+      line_items: (s.line_items ?? []).map((li: LineItemResult) => ({
+        ...li,
+        quantity: li.quantity ?? 1,
+        sort_order: li.sort_order ?? 0,
+        is_sublet: li.is_sublet ?? false,
+      })),
+    })),
+    extras: parsed.extras ?? [],
+  };
 }
 
 /**
- * Parse a single invoice PDF using Gemini 2.5 Flash with structured output.
- * Follows the 3-turn conversation pattern from the CCC PDF parser.
+ * Parse a single invoice PDF using Gemini 2.5 Flash with JSON output mode.
+ * Uses @google/generative-ai directly (not LangChain) to ensure maxOutputTokens
+ * is respected — LangChain's withStructuredOutput/response_schema mode was
+ * truncating output at ~16K tokens regardless of the maxOutputTokens setting.
  *
- * @param pdfBase64 - The target PDF as a base64 string
- * @param samplePdfBase64 - Optional sample PDF for few-shot context
+ * Falls back to Pro if parse_confidence < 0.6.
  */
 export async function parseInvoicePdf(
   pdfBase64: string,
@@ -54,51 +111,12 @@ export async function parseInvoicePdf(
 ): Promise<{ result: InvoiceParseResult; elapsedMs: number; model: string }> {
   const startMs = Date.now();
 
-  const systemMessage = new SystemMessage(INVOICE_SYSTEM_PROMPT);
-
-  let messages: (SystemMessage | HumanMessage | AIMessage)[];
-
-  if (samplePdfBase64) {
-    // 3-turn conversation: system → sample PDF → target PDF
-    const sampleMessage = new HumanMessage({
-      content: [
-        { type: 'media', mimeType: 'application/pdf', data: samplePdfBase64 },
-        { type: 'text', text: SAMPLE_PDF_MESSAGE },
-      ],
-    });
-
-    const aiAck = new AIMessage({
-      content: [
-        {
-          type: 'text',
-          text: 'I have reviewed the sample automotive repair invoice and am ready to extract data from your invoice in the same structured format.',
-        },
-      ],
-    });
-
-    const targetMessage = new HumanMessage({
-      content: [
-        { type: 'media', mimeType: 'application/pdf', data: pdfBase64 },
-        { type: 'text', text: PARSE_REQUEST_MESSAGE },
-      ],
-    });
-
-    messages = [systemMessage, sampleMessage, aiAck, targetMessage];
-  } else {
-    // Single-turn: system + target PDF
-    const targetMessage = new HumanMessage({
-      content: [
-        { type: 'media', mimeType: 'application/pdf', data: pdfBase64 },
-        { type: 'text', text: PARSE_REQUEST_MESSAGE },
-      ],
-    });
-    messages = [systemMessage, targetMessage];
-  }
-
   logger.debug('Invoking Gemini PDF parser (flash)');
 
-  let result = await getLlm('flash').invoke(messages);
+  let jsonText = await invokeModel(MODEL_FLASH, pdfBase64, samplePdfBase64);
   let usedModel = MODEL_FLASH;
+
+  let result = parseAndNormalize(jsonText);
 
   // Low-confidence parse — retry with Pro before storing potentially bad data
   if ((result.parse_confidence ?? 1) < CONFIDENCE_RETRY_THRESHOLD) {
@@ -106,7 +124,8 @@ export async function parseInvoicePdf(
       confidence: result.parse_confidence,
       threshold: CONFIDENCE_RETRY_THRESHOLD,
     });
-    result = await getLlm('pro').invoke(messages);
+    jsonText = await invokeModel(MODEL_PRO, pdfBase64, samplePdfBase64);
+    result = parseAndNormalize(jsonText);
     usedModel = MODEL_PRO;
   }
 
@@ -120,21 +139,5 @@ export async function parseInvoicePdf(
     serviceCount: result.services?.length ?? 0,
   });
 
-  // Ensure required fields have defaults (LangChain structured output may not apply Zod defaults)
-  const normalized: InvoiceParseResult = {
-    ...result,
-    services: (result.services ?? []).map((s: ServiceResult) => ({
-      ...s,
-      sort_order: s.sort_order ?? 0,
-      line_items: (s.line_items ?? []).map((li: LineItemResult) => ({
-        ...li,
-        quantity: li.quantity ?? 1,
-        sort_order: li.sort_order ?? 0,
-        is_sublet: li.is_sublet ?? false,
-      })),
-    })),
-    extras: result.extras ?? [],
-  } as InvoiceParseResult;
-
-  return { result: normalized, elapsedMs, model: usedModel };
+  return { result, elapsedMs, model: usedModel };
 }

@@ -62,18 +62,37 @@ async function invokeModel(
   }
 
   const chat = model.startChat({ history });
-  const result = await chat.sendMessage([
+
+  // Wrap sendMessage in a timeout to prevent indefinite hangs on slow API responses
+  const timeoutMs = config.gemini.llmTimeoutMs;
+  const sendPromise = chat.sendMessage([
     { inlineData: { mimeType: 'application/pdf', data: pdfBase64 } },
     { text: PARSE_REQUEST_MESSAGE },
   ]);
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`Gemini ${modelName} timed out after ${timeoutMs}ms`)), timeoutMs),
+  );
 
+  const result = await Promise.race([sendPromise, timeoutPromise]);
   return result.response.text();
 }
 
 function parseAndNormalize(jsonText: string): InvoiceParseResult {
-  let raw = JSON.parse(jsonText);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(jsonText);
+  } catch (err) {
+    const preview = jsonText.slice(0, 200);
+    logger.error('Failed to parse LLM JSON response', { preview, error: err instanceof Error ? err.message : String(err) });
+    throw new Error(`LLM returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Some models occasionally wrap the result in a single-element array
-  if (Array.isArray(raw) && raw.length === 1) raw = raw[0];
+  if (Array.isArray(raw) && raw.length === 1) {
+    logger.debug('Unwrapping single-element array from LLM response');
+    raw = raw[0];
+  }
+
   // Gemini returns null for absent optional fields; coerce null → undefined so
   // Zod .optional() fields accept them (we don't use .nullable() in the schema).
   const parsed = invoiceParseSchema.parse(coerceNulls(raw));
@@ -118,8 +137,9 @@ export async function parseInvoicePdf(
 
   let result = parseAndNormalize(jsonText);
 
-  // Low-confidence parse — retry with Pro before storing potentially bad data
-  if ((result.parse_confidence ?? 1) < CONFIDENCE_RETRY_THRESHOLD) {
+  // Low-confidence parse — retry with Pro before storing potentially bad data.
+  // Use 0.5 (schema default) when LLM omits parse_confidence.
+  if ((result.parse_confidence ?? 0.5) < CONFIDENCE_RETRY_THRESHOLD) {
     logger.info('Low confidence parse, retrying with Pro', {
       confidence: result.parse_confidence,
       threshold: CONFIDENCE_RETRY_THRESHOLD,
@@ -127,6 +147,14 @@ export async function parseInvoicePdf(
     jsonText = await invokeModel(MODEL_PRO, pdfBase64, samplePdfBase64);
     result = parseAndNormalize(jsonText);
     usedModel = MODEL_PRO;
+
+    // If Pro also returned low confidence, log a warning for human review
+    if ((result.parse_confidence ?? 0.5) < CONFIDENCE_RETRY_THRESHOLD) {
+      logger.warn('Pro model also returned low confidence — invoice may need manual review', {
+        confidence: result.parse_confidence,
+        threshold: CONFIDENCE_RETRY_THRESHOLD,
+      });
+    }
   }
 
   const elapsedMs = Date.now() - startMs;

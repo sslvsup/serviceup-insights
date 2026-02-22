@@ -3,8 +3,6 @@ import { getPrisma } from '../db/prisma';
 import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
-const EMBED_MODEL = 'text-embedding-004';
-
 let _genai: GoogleGenerativeAI | undefined;
 
 function getGenai() {
@@ -13,7 +11,7 @@ function getGenai() {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const model = getGenai().getGenerativeModel({ model: EMBED_MODEL });
+  const model = getGenai().getGenerativeModel({ model: config.gemini.embeddingModel });
   const result = await model.embedContent(text);
   return result.embedding.values;
 }

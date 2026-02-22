@@ -1,4 +1,5 @@
 import { BigQuery } from '@google-cloud/bigquery';
+import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
 const BQ_PROJECT = 'serviceupios';
@@ -10,13 +11,31 @@ const bigquery = new BigQuery({ projectId: BQ_PROJECT });
 
 /**
  * Execute a native SQL query directly against BigQuery via ADC.
+ * Supports parameterized queries and enforces a job timeout.
  */
-async function queryBigQuery(sql: string): Promise<Record<string, unknown>[]> {
-  logger.debug('Executing BigQuery query', { sqlPreview: sql.trim().slice(0, 120) });
+async function queryBigQuery(
+  sql: string,
+  params?: Record<string, unknown>,
+): Promise<Record<string, unknown>[]> {
+  const sqlPreview = sql.trim().slice(0, 120);
+  logger.debug('Executing BigQuery query', { sqlPreview });
 
-  const [job] = await bigquery.createQueryJob({ query: sql, location: 'US' });
-  const [rows] = await job.getQueryResults();
-  return rows as Record<string, unknown>[];
+  try {
+    const job = await bigquery.createQueryJob({
+      query: sql,
+      location: 'US',
+      params,
+      jobTimeoutMs: config.processing.bigqueryTimeoutMs,
+    });
+    const [rows] = await job[0].getQueryResults({ maxResults: 50_000 });
+    return rows as Record<string, unknown>[];
+  } catch (err) {
+    logger.error('BigQuery query failed', {
+      sqlPreview,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 export interface InvoiceRow {
@@ -51,14 +70,13 @@ const BASE_SELECT = `
  * Used by the nightly incremental pipeline.
  */
 export async function getNewInvoicesSince(since: Date): Promise<InvoiceRow[]> {
-  const sinceStr = since.toISOString();
   const rows = await queryBigQuery(`
     ${BASE_SELECT}
     WHERE r.invoicepdfurl IS NOT NULL
       AND r._sdc_deleted_at IS NULL
-      AND r.createdat > '${sinceStr}'
+      AND r.createdat > @since
     ORDER BY r.createdat ASC
-  `);
+  `, { since: since.toISOString() });
   return rows as unknown as InvoiceRow[];
 }
 
@@ -106,8 +124,8 @@ export async function getFleetVehicles(fleetId: number): Promise<FleetVehicleRow
     SELECT v.id, v.vin, v.make, v.model, v.year AS vehicle_year
     FROM \`${BQ_PROJECT}.${DATASET}.fleetVehicles\` fv
     JOIN \`${BQ_PROJECT}.${DATASET}.vehicles\` v ON fv.vehicleid = v.id
-    WHERE fv.fleetid = ${fleetId}
+    WHERE fv.fleetid = @fleetId
       AND v.vin IS NOT NULL
-  `);
+  `, { fleetId });
   return rows as unknown as FleetVehicleRow[];
 }

@@ -37,32 +37,87 @@ function initFirebase() {
 }
 
 /**
+ * Parse the file path from a Firebase Storage URL.
+ * Expects format: https://firebasestorage.googleapis.com/v0/b/<bucket>/o/<encoded-path>?...
+ */
+function parseFirebaseStoragePath(pdfUrl: string): string {
+  const url = new URL(pdfUrl);
+  const { pathname } = url;
+
+  // Firebase Storage URLs encode the path after /o/
+  const oIndex = pathname.indexOf('/o/');
+  if (oIndex === -1) {
+    throw new Error(`Invalid Firebase Storage URL (missing /o/ segment): ${pdfUrl}`);
+  }
+
+  const encodedPath = pathname.slice(oIndex + 3);
+  if (!encodedPath) {
+    throw new Error(`Cannot parse Firebase Storage path from URL: ${pdfUrl}`);
+  }
+
+  // Strip any query params that might have been included in the path segment
+  return decodeURIComponent(encodedPath.split('?')[0]);
+}
+
+/**
+ * Retry a function with exponential backoff.
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  maxRetries: number,
+): Promise<T> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxRetries) {
+        const delayMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        logger.warn(`${label} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delayMs}ms`, {
+          error: lastError.message,
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Download a PDF from Firebase Storage given a Firebase Storage URL.
  * Returns the PDF as a base64 string.
  */
 export async function fetchPdfAsBase64(pdfUrl: string): Promise<string> {
   initFirebase();
 
-  const { pathname } = new URL(pdfUrl);
-  // Firebase Storage URLs encode the path after /o/
-  const encodedPath = pathname.split('/o/')[1];
-  if (!encodedPath) {
-    throw new Error(`Cannot parse Firebase Storage path from URL: ${pdfUrl}`);
-  }
-  const filePath = decodeURIComponent(encodedPath.split('?')[0]);
-
+  const filePath = parseFirebaseStoragePath(pdfUrl);
   logger.debug('Downloading PDF from Firebase Storage', { filePath });
 
   const bucket = admin.storage().bucket();
   const file = bucket.file(filePath);
 
   const TIMEOUT_MS = 30_000;
+
+  // Firebase Admin SDK's file.download() does not support AbortSignal.
+  // Use Promise.race with a timeout that rejects — the download runs to
+  // completion in the background but we stop waiting for it.
   const downloadPromise = file.download();
-  const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`Firebase download timed out after ${TIMEOUT_MS}ms`)), TIMEOUT_MS),
-  );
-  const [data] = await Promise.race([downloadPromise, timeoutPromise]);
-  return data.toString('base64');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Firebase download timed out after ${TIMEOUT_MS}ms: ${filePath}`)),
+      TIMEOUT_MS,
+    );
+  });
+
+  try {
+    const [data] = await Promise.race([downloadPromise, timeoutPromise]);
+    return data.toString('base64');
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -80,10 +135,13 @@ export async function fetchPdfFromHttpUrl(url: string): Promise<string> {
 
 /**
  * Smart PDF fetcher — handles both Firebase Storage URLs and plain HTTP URLs.
+ * Retries transient failures with exponential backoff.
  */
 export async function fetchPdf(url: string): Promise<string> {
+  const maxRetries = config.processing.pdfFetchRetries;
+
   if (url.includes('firebasestorage.googleapis.com')) {
-    return fetchPdfAsBase64(url);
+    return withRetry(() => fetchPdfAsBase64(url), 'Firebase PDF fetch', maxRetries);
   }
-  return fetchPdfFromHttpUrl(url);
+  return withRetry(() => fetchPdfFromHttpUrl(url), 'HTTP PDF fetch', maxRetries);
 }

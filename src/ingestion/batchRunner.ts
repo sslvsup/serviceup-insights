@@ -12,6 +12,16 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Check if an error is a rate limit (429) error from Gemini.
+ */
+function isRateLimitError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED') || err.message.includes('rate limit');
+  }
+  return false;
+}
+
 interface BatchItem {
   requestId: number;
   pdfUrl: string;
@@ -34,10 +44,12 @@ interface BatchResult {
 
 /**
  * Process a single invoice: fetch PDF → parse with LLM → normalize → store → embed.
+ * Retries on rate limit errors using maxRetries from config.
  */
 export async function processOne(item: BatchItem): Promise<BatchResult> {
   const prisma = getPrisma();
   const { requestId, pdfUrl } = item;
+  const maxRetries = config.processing.maxRetries;
 
   // Check if already successfully processed
   const existing = await prisma.parsedInvoice.findFirst({
@@ -48,69 +60,106 @@ export async function processOne(item: BatchItem): Promise<BatchResult> {
     return { requestId, invoiceId: existing.id, status: 'skipped' };
   }
 
-  try {
-    // 1. Fetch PDF
-    logger.info('Fetching PDF', { requestId, pdfUrl: pdfUrl.slice(0, 80) });
-    const pdfBase64 = await fetchPdf(pdfUrl);
+  let lastError: Error | undefined;
 
-    // 2. Parse with Gemini (Flash, with Pro fallback for low-confidence parses)
-    const { result, elapsedMs, model } = await parseInvoicePdf(pdfBase64);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // 1. Fetch PDF
+      logger.info('Fetching PDF', { requestId, pdfUrl: pdfUrl.slice(0, 80), attempt: attempt > 0 ? attempt : undefined });
+      const pdfBase64 = await fetchPdf(pdfUrl);
 
-    // 3. Normalize + store
-    const record: InvoiceRecord = {
-      requestId,
-      shopId: item.shopId,
-      vehicleId: item.vehicleId,
-      fleetId: item.fleetId,
-      pdfUrl,
-      shopName: item.shopName,
-      vehicleVin: item.vehicleVin,
-      vehicleMake: item.vehicleMake,
-      vehicleModel: item.vehicleModel,
-      vehicleYear: item.vehicleYear,
-      llmModel: model,
-      elapsedMs,
-    };
-    const invoiceId = await normalizeAndStore(record, result);
+      // 2. Parse with Gemini (Flash, with Pro fallback for low-confidence parses)
+      const { result, elapsedMs, model } = await parseInvoicePdf(pdfBase64);
 
-    // 4. Embed for pgvector
-    if (result.raw_text && config.gemini.apiKey) {
-      await embedInvoiceData(
-        invoiceId,
-        item.fleetId,
-        item.shopId,
-        result.raw_text,
-        result.services,
-      );
-    }
-
-    return { requestId, invoiceId, status: 'success' };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error('Failed to process invoice', { requestId, error: message });
-
-    // Mark as failed in DB
-    await prisma.parsedInvoice.upsert({
-      where: { requestId_pdfUrl: { requestId, pdfUrl } },
-      create: {
+      // 3. Normalize + store
+      const record: InvoiceRecord = {
         requestId,
         shopId: item.shopId,
         vehicleId: item.vehicleId,
         fleetId: item.fleetId,
         pdfUrl,
-        parseStatus: 'failed',
-        extractedData: {},
-        parseMeta: { error: message, parsed_at: new Date().toISOString() },
-      },
-      update: {
-        parseStatus: 'failed',
-        parseMeta: { error: message, parsed_at: new Date().toISOString() },
-        updatedAt: new Date(),
-      },
-    });
+        shopName: item.shopName,
+        vehicleVin: item.vehicleVin,
+        vehicleMake: item.vehicleMake,
+        vehicleModel: item.vehicleModel,
+        vehicleYear: item.vehicleYear,
+        llmModel: model,
+        elapsedMs,
+      };
+      const invoiceId = await normalizeAndStore(record, result);
 
-    return { requestId, status: 'failed', error: message };
+      // 4. Embed for pgvector — wrapped in try-catch so embedding failures
+      // don't mark a successfully parsed invoice as failed
+      if (result.raw_text && config.gemini.apiKey) {
+        try {
+          const embedResult = await embedInvoiceData(
+            invoiceId,
+            item.fleetId,
+            item.shopId,
+            result.raw_text,
+            result.services,
+          );
+          logger.debug('Embedding complete', {
+            invoiceId,
+            fullDocEmbedded: embedResult.fullDocEmbedded,
+            corrections: embedResult.correctionCount,
+            skipped: embedResult.skippedCount,
+          });
+        } catch (embedErr) {
+          logger.error('Embedding failed (invoice parse still succeeded)', {
+            invoiceId,
+            requestId,
+            error: embedErr instanceof Error ? embedErr.message : String(embedErr),
+          });
+        }
+      }
+
+      return { requestId, invoiceId, status: 'success' };
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // Retry on rate limit errors with exponential backoff
+      if (isRateLimitError(err) && attempt < maxRetries) {
+        const backoffMs = Math.pow(2, attempt) * 2000; // 2s, 4s, 8s
+        logger.warn('Rate limited by Gemini API, backing off', {
+          requestId,
+          attempt: attempt + 1,
+          maxRetries,
+          backoffMs,
+        });
+        await sleep(backoffMs);
+        continue;
+      }
+
+      // Non-retryable error or max retries exhausted
+      break;
+    }
   }
+
+  const message = lastError ? lastError.message : 'Unknown error';
+  logger.error('Failed to process invoice', { requestId, error: message });
+
+  // Mark as failed in DB
+  await prisma.parsedInvoice.upsert({
+    where: { requestId_pdfUrl: { requestId, pdfUrl } },
+    create: {
+      requestId,
+      shopId: item.shopId,
+      vehicleId: item.vehicleId,
+      fleetId: item.fleetId,
+      pdfUrl,
+      parseStatus: 'failed',
+      extractedData: {},
+      parseMeta: { error: message, parsed_at: new Date().toISOString() },
+    },
+    update: {
+      parseStatus: 'failed',
+      parseMeta: { error: message, parsed_at: new Date().toISOString() },
+      updatedAt: new Date(),
+    },
+  });
+
+  return { requestId, status: 'failed', error: message };
 }
 
 /**

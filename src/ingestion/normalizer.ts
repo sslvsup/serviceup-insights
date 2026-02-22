@@ -17,6 +17,16 @@ function parseDate(dateStr: string | null | undefined): Date | null {
   }
 }
 
+/**
+ * Validate that a candidate date is a plausible invoice date (not a vehicle production
+ * year like "3/2024" and not an implausible future date).
+ */
+function isPlausibleInvoiceDate(date: Date): boolean {
+  const year = date.getFullYear();
+  const maxYear = new Date().getFullYear() + 1;
+  return year >= 2020 && year <= maxYear;
+}
+
 function buildItemData(item: LineItemResult): Record<string, unknown> {
   const data: Record<string, unknown> = {};
 
@@ -100,7 +110,7 @@ export async function normalizeAndStore(
   // Build the extracted_data JSONB — everything the LLM found
   const extractedData = {
     ...parsed,
-    // Remove large fields that have dedicated columns
+    // Remove large fields that have dedicated columns or separate tables
     services: undefined,
     raw_text: undefined,
     extras: parsed.extras,
@@ -110,17 +120,35 @@ export async function normalizeAndStore(
   // that embed the date in non-standard fields like "printed_date" or "vehicle_out_date"
   const DATE_EXTRA_NAMES = ['vehicle_out_date', 'date_out', 'printed_date', 'printed_date_time', 'close_date', 'completion_date'];
   let invoiceDate = parseDate(parsed.invoice_date ?? parsed.estimate_date ?? parsed.date_out ?? parsed.date_in);
+  if (invoiceDate && !isPlausibleInvoiceDate(invoiceDate)) {
+    logger.warn('Primary invoice date outside plausible range, discarding', {
+      requestId: record.requestId,
+      invoiceDate: invoiceDate.toISOString(),
+    });
+    invoiceDate = null;
+  }
   if (!invoiceDate && parsed.extras) {
     for (const extra of parsed.extras) {
       if (DATE_EXTRA_NAMES.some(n => extra.field_name.toLowerCase().includes(n.toLowerCase().replace('_', '')))) {
         const candidate = parseDate(extra.field_value);
-        // Only use if it looks like a real date (not a vehicle production date like "3/2024")
-        if (candidate && candidate.getFullYear() >= 2020) {
+        if (candidate && isPlausibleInvoiceDate(candidate)) {
           invoiceDate = candidate;
           break;
         }
       }
     }
+  }
+
+  // Log data quality warnings
+  const unknownNameCount = parsed.services.reduce(
+    (acc, s) => acc + s.line_items.filter(li => li.name === 'Unknown').length,
+    0,
+  );
+  if (unknownNameCount > 0) {
+    logger.warn('Invoice contains line items with name=Unknown', {
+      requestId: record.requestId,
+      unknownNameCount,
+    });
   }
 
   const invoice = await prisma.parsedInvoice.upsert({
@@ -188,36 +216,46 @@ export async function normalizeAndStore(
       ? parsed.services
       : [{ service_name: 'General Service', line_items: [], sort_order: 0 }];
 
-  // Delete existing services/items for re-processing
-  await prisma.parsedInvoiceLineItem.deleteMany({ where: { parsedInvoiceId: invoice.id } });
-  await prisma.parsedInvoiceService.deleteMany({ where: { parsedInvoiceId: invoice.id } });
-
-  for (const [si, service] of services.entries()) {
-    const dbService = await prisma.parsedInvoiceService.create({
-      data: {
-        parsedInvoiceId: invoice.id,
-        serviceName: service.service_name ?? 'General Service',
-        serviceData: buildServiceData(service) as object,
-        sortOrder: service.sort_order ?? si,
-      },
+  if (parsed.services.length === 0) {
+    logger.debug('No services from LLM, using placeholder "General Service"', {
+      requestId: record.requestId,
     });
+  }
 
-    for (const [li, item] of service.line_items.entries()) {
-      await prisma.parsedInvoiceLineItem.create({
+  // Wrap service/item creation in a transaction so partial failures don't leave
+  // the invoice in a corrupted state (deleted services but no new ones)
+  await prisma.$transaction(async (tx) => {
+    // Delete existing services/items for re-processing
+    await tx.parsedInvoiceLineItem.deleteMany({ where: { parsedInvoiceId: invoice.id } });
+    await tx.parsedInvoiceService.deleteMany({ where: { parsedInvoiceId: invoice.id } });
+
+    for (const [si, service] of services.entries()) {
+      const dbService = await tx.parsedInvoiceService.create({
         data: {
           parsedInvoiceId: invoice.id,
-          parsedServiceId: dbService.id,
-          itemType: item.item_type,
-          name: item.name,
-          quantity: item.quantity,
-          unitPriceCents: toCents(item.unit_price),
-          totalPriceCents: toCents(item.total_price),
-          itemData: buildItemData(item) as object,
-          sortOrder: item.sort_order ?? li,
+          serviceName: service.service_name ?? 'General Service',
+          serviceData: buildServiceData(service) as object,
+          sortOrder: service.sort_order ?? si,
         },
       });
+
+      for (const [li, item] of service.line_items.entries()) {
+        await tx.parsedInvoiceLineItem.create({
+          data: {
+            parsedInvoiceId: invoice.id,
+            parsedServiceId: dbService.id,
+            itemType: item.item_type,
+            name: item.name,
+            quantity: item.quantity,
+            unitPriceCents: toCents(item.unit_price),
+            totalPriceCents: toCents(item.total_price),
+            itemData: buildItemData(item) as object,
+            sortOrder: item.sort_order ?? li,
+          },
+        });
+      }
     }
-  }
+  });
 
   logger.info('Invoice stored', {
     invoiceId: invoice.id,

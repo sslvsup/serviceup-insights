@@ -24,17 +24,22 @@ export const config = {
 
   gemini: {
     apiKey: optional('GEMINI_API_KEY', ''),
+    embeddingModel: optional('GEMINI_EMBEDDING_MODEL', 'gemini-embedding-001'),
+    embeddingDimensions: parseInt(optional('GEMINI_EMBEDDING_DIMENSIONS', '3072'), 10),
+    llmTimeoutMs: parseInt(optional('GEMINI_LLM_TIMEOUT_MS', '120000'), 10),
   },
 
   api: {
-    port: parseInt(optional('PORT', '4050')),
+    port: parseInt(optional('PORT', '4050'), 10),
     apiKey: optional('API_KEY', ''),
     embedSecret: optional('EMBED_SECRET', 'dev-secret-change-in-prod'),
   },
 
   processing: {
-    batchSize: parseInt(optional('INSIGHTS_BATCH_SIZE', '10')),
-    maxRetries: parseInt(optional('INSIGHTS_MAX_RETRIES', '3')),
+    batchSize: parseInt(optional('INSIGHTS_BATCH_SIZE', '10'), 10),
+    maxRetries: parseInt(optional('INSIGHTS_MAX_RETRIES', '3'), 10),
+    pdfFetchRetries: parseInt(optional('INSIGHTS_PDF_FETCH_RETRIES', '2'), 10),
+    bigqueryTimeoutMs: parseInt(optional('BIGQUERY_TIMEOUT_MS', '60000'), 10),
   },
 
   seed: {

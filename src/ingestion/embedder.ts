@@ -3,10 +3,6 @@ import { getPrisma } from '../db/prisma';
 import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
-// gemini-embedding-001 produces 3072-dim vectors (matches our vector(3072) schema).
-// text-embedding-004 is not enabled for the serviceupaistudio API key.
-const EMBED_MODEL = 'gemini-embedding-001';
-
 let _genai: GoogleGenerativeAI | undefined;
 
 function getGenai() {
@@ -18,12 +14,19 @@ function getGenai() {
 
 async function getEmbedding(text: string): Promise<number[]> {
   const genai = getGenai();
-  const model = genai.getGenerativeModel({ model: EMBED_MODEL });
+  const model = genai.getGenerativeModel({ model: config.gemini.embeddingModel });
   const result = await model.embedContent(text);
   return result.embedding.values;
 }
 
 function vectorToSql(embedding: number[]): string {
+  const expectedDims = config.gemini.embeddingDimensions;
+  if (embedding.length !== expectedDims) {
+    throw new Error(
+      `Embedding dimension mismatch: got ${embedding.length}, expected ${expectedDims}. ` +
+      `Check GEMINI_EMBEDDING_MODEL and GEMINI_EMBEDDING_DIMENSIONS config.`,
+    );
+  }
   return `[${embedding.join(',')}]`;
 }
 
@@ -34,14 +37,14 @@ export async function embedInvoice(
   invoiceId: number,
   rawText: string,
   metadata: Record<string, unknown>,
-): Promise<void> {
+): Promise<boolean> {
   const prisma = getPrisma();
 
   // Check if already embedded
   const existing = await prisma.invoiceEmbedding.findFirst({
     where: { parsedInvoiceId: invoiceId, chunkType: 'full_document' },
   });
-  if (existing) return;
+  if (existing) return false;
 
   const text = rawText.slice(0, 8000); // limit to avoid token limits
   const embedding = await getEmbedding(text);
@@ -54,6 +57,7 @@ export async function embedInvoice(
   `;
 
   logger.debug('Embedded full document', { invoiceId });
+  return true;
 }
 
 /**
@@ -80,6 +84,7 @@ export async function embedServiceCorrection(
 /**
  * Embed all relevant text from a parsed invoice.
  * Called after normalizeAndStore() completes.
+ * Returns the number of embeddings created.
  */
 export async function embedInvoiceData(
   invoiceId: number,
@@ -87,16 +92,20 @@ export async function embedInvoiceData(
   shopId: number | null | undefined,
   rawText: string,
   services: Array<{ complaint?: string | null; cause?: string | null; correction?: string | null; service_name?: string | null }>,
-): Promise<void> {
+): Promise<{ fullDocEmbedded: boolean; correctionCount: number; skippedCount: number }> {
   const baseMetadata = {
     fleet_id: fleetId ?? null,
     shop_id: shopId ?? null,
     invoice_id: invoiceId,
   };
 
+  let fullDocEmbedded = false;
+  let correctionCount = 0;
+  let skippedCount = 0;
+
   // Embed full document
   if (rawText.trim().length > 20) {
-    await embedInvoice(invoiceId, rawText, baseMetadata);
+    fullDocEmbedded = await embedInvoice(invoiceId, rawText, baseMetadata);
   }
 
   // Embed each service correction
@@ -108,6 +117,19 @@ export async function embedInvoiceData(
         ...baseMetadata,
         service_name: service.service_name ?? 'Unknown Service',
       });
+      correctionCount++;
+    } else {
+      skippedCount++;
     }
   }
+
+  if (skippedCount > 0) {
+    logger.debug('Skipped embedding services with no complaint/cause/correction', {
+      invoiceId,
+      skippedCount,
+      embeddedCount: correctionCount,
+    });
+  }
+
+  return { fullDocEmbedded, correctionCount, skippedCount };
 }

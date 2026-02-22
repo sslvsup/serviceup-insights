@@ -131,8 +131,8 @@ export const invoiceParseSchema = z.object({
   vehicle_color: z.string().optional(),
   vehicle_plate: z.string().optional(),
   vehicle_unit: z.string().optional(),
-  mileage_in: z.number().optional(),
-  mileage_out: z.number().optional(),
+  mileage_in: z.number().min(0).optional(),
+  mileage_out: z.number().min(0).optional(),
 
   // Financial totals (in dollars)
   subtotal: z.number().optional(),
@@ -168,7 +168,7 @@ export const invoiceParseSchema = z.object({
   services: z.array(serviceSchema).optional().default([]),
 
   // Catch-all for any fields not in the schema
-  extras: z.array(extraFieldSchema).optional().default([]),
+  extras: z.array(extraFieldSchema).max(100).optional().default([]),
 
   // Full text for backup + pgvector embedding; truncated in parseAndNormalize to 8000 chars
   raw_text: z.string().optional().default(''),

@@ -14,9 +14,12 @@ export function getPrisma(): PrismaClient {
   return _prisma;
 }
 
+// Proxy wraps the lazy singleton so callers can write `prisma.foo` without
+// calling getPrisma() themselves. `as any` is unavoidable here because the
+// Proxy trap signature does not know which PrismaClient property is accessed.
 export const prisma = new Proxy({} as PrismaClient, {
   get(_target, prop) {
-    return (getPrisma() as any)[prop];
+    return (getPrisma() as unknown as Record<string | symbol, unknown>)[prop as string | symbol];
   },
 });
 

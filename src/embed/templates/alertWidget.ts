@@ -5,6 +5,9 @@ export interface AlertWidgetData {
   summary: string;
   priority: number;
   savingsEstimateCents?: number | null;
+  icon?: string;
+  iconColor?: string;
+  insightType?: string;
   alerts: Array<{
     headline: string;
     detail?: string;
@@ -14,47 +17,43 @@ export interface AlertWidgetData {
 }
 
 export function renderAlertWidget(data: AlertWidgetData): string {
-  const alertsHtml = data.alerts.map((alert) => {
-    const colorMap = {
-      critical: 'var(--color-error)',
-      warning: 'var(--color-warning)',
-      info: 'var(--color-info)',
-    };
-    const borderColor = colorMap[alert.severity ?? 'warning'];
-    const icon = alert.severity === 'critical' ? '🚨' : alert.severity === 'info' ? 'ℹ️' : '⚠️';
+  const p = data.priority;
+  const icon = data.icon ?? '⚠️';
+  const iconColor = data.iconColor ?? (p === 1 ? 'red' : 'amber');
 
+  const alertsHtml = data.alerts.map(alert => {
+    const sev = alert.severity ?? (p === 1 ? 'critical' : 'warning');
+    const sevClass = sev === 'critical' ? 'sev-c' : sev === 'info' ? 'sev-i' : 'sev-w';
+    const alertIcon = sev === 'critical' ? '🚨' : sev === 'info' ? 'ℹ️' : '⚠️';
+    const ctaClass = sev === 'critical' ? 'c' : 'w';
     return `
-    <div style="border-left:3px solid ${borderColor};padding:10px 12px;margin-bottom:8px;background:var(--color-surface);border-radius:0 var(--radius-sm) var(--radius-sm) 0;">
-      <div style="display:flex;gap:8px;align-items:flex-start;">
-        <span style="font-size:16px;flex-shrink:0;">${icon}</span>
-        <div style="flex:1;">
-          <div style="font-weight:600;font-size:13px;color:var(--color-text-primary);">${escapeHtml(alert.headline)}</div>
-          ${alert.detail ? `<div style="font-size:12px;color:var(--color-text-secondary);margin-top:3px;">${escapeHtml(alert.detail)}</div>` : ''}
-          ${alert.actionText ? `<div style="font-size:12px;font-weight:600;color:${borderColor};margin-top:4px;">→ ${escapeHtml(alert.actionText)}</div>` : ''}
-        </div>
+    <div class="alert-item ${sevClass}">
+      <div class="alert-icon">${alertIcon}</div>
+      <div>
+        <div class="alert-headline">${escapeHtml(alert.headline)}</div>
+        ${alert.detail ? `<div class="alert-detail">${escapeHtml(alert.detail)}</div>` : ''}
+        ${alert.actionText ? `<div class="alert-cta ${ctaClass}">→ ${escapeHtml(alert.actionText)}</div>` : ''}
       </div>
     </div>`;
   }).join('');
 
-  const priorityBadge = data.priority <= 2
-    ? `<span class="priority-badge priority-${data.priority}">${data.priority === 1 ? 'URGENT' : 'HIGH'}</span>`
-    : '';
-
-  const emptyHtml = data.alerts.length === 0
-    ? `<div class="empty-state">✅ No alerts — looks good!</div>`
+  const badgeHtml = p <= 2
+    ? `<span class="badge ${p === 1 ? 'b-red' : 'b-amber'}">${p === 1 ? '🚨 Urgent' : '⚠️ High'}</span>`
     : '';
 
   return `
-  <div class="widget">
-    <div class="widget-header">
-      <div>
-        <h3 class="widget-title">${escapeHtml(data.title)}</h3>
-        <p class="widget-summary">${escapeHtml(data.summary)}</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">${priorityBadge}</div>
+  <div class="widget p${p}">
+    <div class="w-body">
+      <div class="w-head">
+        <div class="w-icon-box ${escapeHtml(iconColor)}">${icon}</div>
+        <div class="w-title-g">
+          <div class="w-title">${escapeHtml(data.title)}</div>
+          <div class="w-summary">${escapeHtml(data.summary)}</div>
+        </div>
       </div>
-    </div>
-    <div style="flex:1;overflow-y:auto;margin-top:8px;">
-      ${alertsHtml || emptyHtml}
+      ${badgeHtml ? `<div class="badge-row">${badgeHtml}</div>` : ''}
+      <div class="w-div"></div>
+      ${alertsHtml || '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">No alerts</div></div>'}
     </div>
   </div>`;
 }

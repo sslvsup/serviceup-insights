@@ -106,8 +106,22 @@ export async function normalizeAndStore(
     extras: parsed.extras,
   };
 
-  // Determine invoice date (try parsed date, fall back to null)
-  const invoiceDate = parseDate(parsed.invoice_date ?? parsed.estimate_date);
+  // Determine invoice date — try main fields first, then extras for CCC/collision formats
+  // that embed the date in non-standard fields like "printed_date" or "vehicle_out_date"
+  const DATE_EXTRA_NAMES = ['vehicle_out_date', 'date_out', 'printed_date', 'printed_date_time', 'close_date', 'completion_date'];
+  let invoiceDate = parseDate(parsed.invoice_date ?? parsed.estimate_date ?? parsed.date_out ?? parsed.date_in);
+  if (!invoiceDate && parsed.extras) {
+    for (const extra of parsed.extras) {
+      if (DATE_EXTRA_NAMES.some(n => extra.field_name.toLowerCase().includes(n.toLowerCase().replace('_', '')))) {
+        const candidate = parseDate(extra.field_value);
+        // Only use if it looks like a real date (not a vehicle production date like "3/2024")
+        if (candidate && candidate.getFullYear() >= 2020) {
+          invoiceDate = candidate;
+          break;
+        }
+      }
+    }
+  }
 
   const invoice = await prisma.parsedInvoice.upsert({
     where: {
@@ -125,7 +139,7 @@ export async function normalizeAndStore(
       pdfType: 'invoice',
       parseStatus: parsed.is_valid_invoice ? 'completed' : 'failed',
       invoiceDate,
-      grandTotalCents: toCents(parsed.grand_total),
+      grandTotalCents: toCents(parsed.grand_total ?? parsed.subtotal ?? parsed.balance_due),
       laborTotalCents: toCents(parsed.labor_total),
       partsTotalCents: toCents(parsed.parts_total),
       taxAmountCents: toCents(parsed.tax_amount),
@@ -145,7 +159,7 @@ export async function normalizeAndStore(
     update: {
       parseStatus: parsed.is_valid_invoice ? 'completed' : 'failed',
       invoiceDate,
-      grandTotalCents: toCents(parsed.grand_total),
+      grandTotalCents: toCents(parsed.grand_total ?? parsed.subtotal ?? parsed.balance_due),
       laborTotalCents: toCents(parsed.labor_total),
       partsTotalCents: toCents(parsed.parts_total),
       taxAmountCents: toCents(parsed.tax_amount),

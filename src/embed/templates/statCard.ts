@@ -3,50 +3,71 @@ import { escapeHtml } from './layout';
 export interface StatCardData {
   title: string;
   summary: string;
+  priority?: number;
+  savingsEstimateCents?: number | null;
+  icon?: string;
+  iconColor?: string;
+  insightType?: string;
   value: string;
   label?: string;
   delta?: string;
   deltaDirection?: 'positive' | 'negative' | 'neutral';
   secondaryStats?: Array<{ label: string; value: string }>;
-  priority?: number;
-  savingsEstimateCents?: number | null;
+  extraChip?: { label: string; value: string };
 }
 
 export function renderStatCard(data: StatCardData): string {
-  const deltaHtml = data.delta
-    ? `<span class="stat-delta ${data.deltaDirection ?? 'neutral'}">${escapeHtml(data.delta)}</span>`
+  const p = data.priority ?? 3;
+  const icon = data.icon ?? '💡';
+  const iconColor = data.iconColor ?? 'blue';
+
+  const badgeHtml = p <= 2
+    ? `<span class="badge ${p === 1 ? 'b-red' : 'b-amber'}">${p === 1 ? '🚨 Urgent' : '⚠️ High'}</span>`
     : '';
 
-  const secondaryHtml = data.secondaryStats
-    ?.map((s) => `
-      <div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid var(--color-border);">
-        <span style="color:var(--color-text-secondary);font-size:12px;">${escapeHtml(s.label)}</span>
-        <span style="font-weight:600;font-size:12px;">${escapeHtml(s.value)}</span>
-      </div>`)
-    .join('') ?? '';
-
-  const savingsChip = data.savingsEstimateCents && data.savingsEstimateCents > 0
+  const savingsHtml = data.savingsEstimateCents && data.savingsEstimateCents > 0
     ? `<span class="savings-chip">💰 Save ~$${Math.round(data.savingsEstimateCents / 100).toLocaleString()}/yr</span>`
     : '';
 
-  const priorityBadge = data.priority && data.priority <= 2
-    ? `<span class="priority-badge priority-${data.priority}">${data.priority === 1 ? 'URGENT' : 'HIGH'}</span>`
+  const deltaClass = data.deltaDirection === 'positive' ? 'up' : data.deltaDirection === 'negative' ? 'down' : 'flat';
+  const deltaArrow = data.deltaDirection === 'positive' ? '↑' : data.deltaDirection === 'negative' ? '↓' : '→';
+  const deltaHtml = data.delta
+    ? `<div class="stat-delta ${deltaClass}">${deltaArrow} ${escapeHtml(data.delta)}</div>`
+    : '';
+
+  const secondaryHtml = data.secondaryStats && data.secondaryStats.length > 0
+    ? `<div class="stat-meta">${data.secondaryStats.map(s => `
+        <div class="stat-meta-cell">
+          <div class="stat-meta-lbl">${escapeHtml(s.label)}</div>
+          <div class="stat-meta-val">${escapeHtml(s.value)}</div>
+        </div>`).join('')}</div>`
+    : '';
+
+  const chipHtml = data.extraChip
+    ? `<div class="data-chip">
+        <div class="data-chip-lbl">${escapeHtml(data.extraChip.label)}</div>
+        <div class="data-chip-val">${escapeHtml(data.extraChip.value)}</div>
+       </div>`
     : '';
 
   return `
-  <div class="widget">
-    <div class="widget-header">
-      <div>
-        <h3 class="widget-title">${escapeHtml(data.title)}</h3>
-        <p class="widget-summary">${escapeHtml(data.summary)}</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">${priorityBadge}${savingsChip}</div>
+  <div class="widget p${p}">
+    <div class="w-body">
+      <div class="w-head">
+        <div class="w-icon-box ${escapeHtml(iconColor)}">${icon}</div>
+        <div class="w-title-g">
+          <div class="w-title">${escapeHtml(data.title)}</div>
+          <div class="w-summary">${escapeHtml(data.summary)}</div>
+        </div>
       </div>
+      ${chipHtml ? chipHtml : ''}
+      <div class="stat-hero">
+        <div class="stat-num brand">${escapeHtml(data.value)}</div>
+        ${data.label ? `<div class="stat-sublabel">${escapeHtml(data.label)}</div>` : ''}
+        ${deltaHtml}
+      </div>
+      ${secondaryHtml}
+      ${badgeHtml || savingsHtml ? `<div class="badge-row">${badgeHtml}${savingsHtml}</div>` : ''}
     </div>
-    <div style="padding:8px 0;">
-      <div class="stat-value">${escapeHtml(data.value)}</div>
-      ${data.label ? `<div class="stat-label">${escapeHtml(data.label)}</div>` : ''}
-      ${deltaHtml}
-    </div>
-    ${secondaryHtml ? `<div style="margin-top:8px;">${secondaryHtml}</div>` : ''}
   </div>`;
 }

@@ -123,7 +123,7 @@ export const invoiceParseSchema = z.object({
 
   // Vehicle
   vin: z.string().optional(),
-  vehicle_year: z.string().optional(),
+  vehicle_year: z.coerce.string().optional(),
   vehicle_make: z.string().optional(),
   vehicle_model: z.string().optional(),
   vehicle_submodel: z.string().optional(),
@@ -162,7 +162,7 @@ export const invoiceParseSchema = z.object({
   // Terms
   warranty_text: z.string().optional(),
   terms_text: z.string().optional(),
-  notes: z.string().optional(),
+  notes: z.preprocess(v => Array.isArray(v) ? (v as unknown[]).join('\n') : v, z.string().optional()),
 
   // Structured data
   services: z.array(serviceSchema).optional().default([]),

@@ -15,7 +15,8 @@
     "seed": "tsx src/scripts/seedFromGsheet.ts",
     "backfill": "tsx src/scripts/backfill.ts",
     "pipeline": "tsx src/jobs/nightlyPipeline.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^8.1.1",

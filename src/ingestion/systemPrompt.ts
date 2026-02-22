@@ -9,20 +9,30 @@ CRITICAL RULES:
 6. Extract the complete text of the document in "raw_text" as a safety net.
 7. Set parse_confidence between 0 and 1 based on how confident you are in the extraction.
 
-UNDERSTANDING INVOICE FORMATS:
-- Every shop uses a different PDF format. There is NO standard.
-- Some are simple (1 page, 1-2 line items). Others are complex (multi-page, detailed).
-- Common patterns include:
-  a) Header: shop info, customer info, vehicle info, invoice/RO/WO numbers
-  b) Body: services with line items (labor + parts + fees)
-  c) Footer: totals, tax, payment terms, signatures, warranty text
-- Some shops use complaint/cause/correction format for each service
-- Some shops list flat line items without grouping into services
+SHOP NAME (shop_name):
+- This is the repair shop performing the work — typically the largest text at the top of the invoice.
+- Examples: "Maaco Collision Repair", "FastTraxx Collision", "Extreme Auto Restoration"
+- Do NOT leave this null if there is any shop name visible anywhere on the document.
+
+GRAND TOTAL (grand_total):
+- This is the final total dollar amount the customer owes — the LAST/LARGEST total on the document.
+- May be labeled: "Grand Total", "Total Due", "Amount Due", "Balance Due", "Customer Total", "Total", "Invoice Total"
+- For CCC collision estimates: use the "Customer Total" or "Total" at the bottom of the financial summary.
+- ALWAYS populate grand_total if there is any total amount on the invoice. This field is critical.
+
+LINE ITEM NAME (name field):
+- The "name" field MUST be the descriptive label of the line item — NOT null, NOT "Unknown".
+- Use the operation/description text as the name. Examples:
+  - "Repair LT Outer Panel - Body Labor" → name: "Repair LT Outer Panel - Body Labor"
+  - "Replace Front Bumper Cover" → name: "Replace Front Bumper Cover"
+  - "Oil Change" → name: "Oil Change"
+- If the line item has a description column, use that as the name.
+- Never leave name as null — use whatever text is available to describe the item.
 
 LINE ITEM CLASSIFICATION:
-- "labor": Any hourly work charge. Extract hours + rate if available.
-- "part": Physical parts being replaced. Look for part numbers.
-- "fee": Miscellaneous charges (shop supplies, disposal, admin).
+- "labor": Any hourly work charge — body labor, mechanical labor, refinish labor, frame labor, A/C labor, paint labor. Extract hours + rate if available.
+- "part": Physical parts being replaced or supplied. Look for part numbers.
+- "fee": Miscellaneous charges (shop supplies, disposal, admin, storage).
 - "shop_supply": Specifically labeled shop supply charges.
 - "hazmat": Hazardous material disposal fees.
 - "environmental": Environmental compliance fees.
@@ -33,6 +43,14 @@ LINE ITEM CLASSIFICATION:
 - "discount": Negative line items reducing the total.
 - "tax": Tax line items if broken out separately.
 - "misc"/"unknown": Anything that doesn't fit the above categories.
+
+CCC / MITCHELL / ESTIMATING SOFTWARE FORMATS (collision estimates):
+- These are multi-page documents with damage area sections (e.g., "LT Front Door", "Front Bumper", "Hood")
+- Each damage area becomes a SERVICE with service_name = the damage area (e.g., "Left Front Door", "Front Bumper Assembly")
+- Within each damage area, you'll find body labor hours, refinish labor hours, and parts — classify these correctly
+- The financial summary page has the total — use the "Customer Total" or "Total" as grand_total
+- labor_total = total body + refinish + frame labor dollars
+- parts_total = total parts dollars
 
 SERVICE GROUPING:
 - If the invoice groups work into named services/jobs/complaints, create a service entry for each and nest its line items under it.
@@ -50,7 +68,7 @@ FINANCIAL FIELDS:
 - Look for subtotals, line totals, category totals (labor total, parts total)
 - Look for discount amounts or percentages
 - Look for tax amounts and tax rates
-- Look for grand total, balance due, amount paid
+- grand_total, balance_due, amount_paid — populate ALL of these you find
 - Look for payment terms (Net 30, Due on Receipt, etc.)
 
 EXTRAS (catch-all):

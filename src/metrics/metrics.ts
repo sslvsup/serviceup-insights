@@ -9,7 +9,7 @@ export async function getTotalSpend(fleetId: number, since: Date): Promise<numbe
     _sum: { grandTotalCents: true },
     where: {
       fleetId,
-      invoiceDate: { gte: since },
+      OR: [{ invoiceDate: { gte: since } }, { invoiceDate: null }],
       parseStatus: 'completed',
     },
   });
@@ -23,7 +23,7 @@ export async function getSpendByShop(fleetId: number, since: Date) {
            COUNT(*)::int AS invoice_count
     FROM parsed_invoices
     WHERE fleet_id = ${fleetId}
-      AND invoice_date >= ${since}
+      AND (invoice_date >= ${since} OR invoice_date IS NULL)
       AND parse_status = 'completed'
     GROUP BY pdf_shop_name
     ORDER BY total DESC
@@ -54,7 +54,7 @@ export async function getAvgLaborRateByShop(fleetId: number, since: Date) {
     FROM parsed_invoice_line_items li
     JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
     WHERE pi.fleet_id = ${fleetId}
-      AND pi.invoice_date >= ${since}
+      AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
       AND li.item_type = 'labor'
       AND li.item_data->>'rate_per_hour' IS NOT NULL
     GROUP BY pi.pdf_shop_name
@@ -70,7 +70,7 @@ export async function getLaborHoursByShop(fleetId: number, since: Date) {
     FROM parsed_invoice_line_items li
     JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
     WHERE pi.fleet_id = ${fleetId}
-      AND pi.invoice_date >= ${since}
+      AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
       AND li.item_type = 'labor'
       AND li.item_data->>'hours' IS NOT NULL
     GROUP BY pi.pdf_shop_name
@@ -89,7 +89,7 @@ export async function getTopReplacedParts(fleetId: number, since: Date, limit = 
     FROM parsed_invoice_line_items li
     JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
     WHERE pi.fleet_id = ${fleetId}
-      AND pi.invoice_date >= ${since}
+      AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
       AND li.item_type = 'part'
     GROUP BY li.name
     ORDER BY count DESC
@@ -131,8 +131,8 @@ export async function getCostBreakdown(fleetId: number, since: Date) {
       FROM parsed_invoice_line_items li
       JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
       WHERE pi.fleet_id = ${fleetId}
-        AND pi.invoice_date >= ${since}
-        AND parse_status = 'completed'
+        AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
+        AND pi.parse_status = 'completed'
       GROUP BY category
     )
     SELECT category, total,
@@ -166,7 +166,7 @@ export async function getAnomalies(
       FROM parsed_invoice_line_items li
       JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
       WHERE pi.fleet_id = ${fleetId}
-        AND pi.invoice_date >= ${since}
+        AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
         AND li.item_type IN ('part', 'labor')
       GROUP BY li.name
       HAVING COUNT(*) >= 3
@@ -206,7 +206,7 @@ export async function getVehicleRepairFrequency(fleetId: number, since: Date) {
            MAX(invoice_date)::text AS last_repair_date
     FROM parsed_invoices
     WHERE fleet_id = ${fleetId}
-      AND invoice_date >= ${since}
+      AND (invoice_date >= ${since} OR invoice_date IS NULL)
       AND parse_status = 'completed'
     GROUP BY pdf_vin, extracted_data->>'vehicle_unit'
     ORDER BY repair_count DESC
@@ -313,11 +313,144 @@ export async function getPartCostBenchmark(fleetId: number, partName: string, si
   `;
 }
 
+// ── Vehicle Multiple Visits ─────────────────────────────────────────────────
+
+export async function getVehicleMultipleVisits(fleetId: number, since: Date) {
+  return prisma.$queryRaw<{
+    vin: string;
+    unit: string | null;
+    visit_count: number;
+    total_spend: number;
+    first_visit: string;
+    last_visit: string;
+    shops: string;
+  }[]>`
+    SELECT
+      pdf_vin AS vin,
+      MAX(extracted_data->>'vehicle_unit') AS unit,
+      COUNT(*)::int AS visit_count,
+      SUM(grand_total_cents) / 100.0 AS total_spend,
+      MIN(invoice_date)::text AS first_visit,
+      MAX(invoice_date)::text AS last_visit,
+      STRING_AGG(DISTINCT pdf_shop_name, ', ') AS shops
+    FROM parsed_invoices
+    WHERE fleet_id = ${fleetId}
+      AND (invoice_date >= ${since} OR invoice_date IS NULL)
+      AND parse_status = 'completed'
+      AND pdf_vin IS NOT NULL
+    GROUP BY pdf_vin
+    HAVING COUNT(*) > 1
+    ORDER BY total_spend DESC
+    LIMIT 10
+  `;
+}
+
+// ── Shop Turnaround Time ────────────────────────────────────────────────────
+
+export async function getShopTurnaround(fleetId: number, since: Date) {
+  return prisma.$queryRaw<{
+    shop_name: string;
+    avg_days: number;
+    max_days: number;
+    invoice_count: number;
+  }[]>`
+    SELECT
+      pdf_shop_name AS shop_name,
+      ROUND(AVG(
+        GREATEST(0, (extracted_data->>'date_out')::date - (extracted_data->>'date_in')::date)
+      )::numeric, 1) AS avg_days,
+      MAX(
+        GREATEST(0, (extracted_data->>'date_out')::date - (extracted_data->>'date_in')::date)
+      ) AS max_days,
+      COUNT(*)::int AS invoice_count
+    FROM parsed_invoices
+    WHERE fleet_id = ${fleetId}
+      AND (invoice_date >= ${since} OR invoice_date IS NULL)
+      AND parse_status = 'completed'
+      AND extracted_data->>'date_in' IS NOT NULL
+      AND extracted_data->>'date_out' IS NOT NULL
+      AND (extracted_data->>'date_out')::date > (extracted_data->>'date_in')::date
+    GROUP BY pdf_shop_name
+    ORDER BY avg_days DESC
+  `;
+}
+
+// ── Parts Quality Mix ───────────────────────────────────────────────────────
+
+export async function getPartsQualityMix(fleetId: number, since: Date) {
+  return prisma.$queryRaw<{
+    quality_type: string;
+    count: number;
+    total_cost: number;
+    pct: number;
+  }[]>`
+    WITH parts_mix AS (
+      SELECT
+        CASE
+          WHEN (li.item_data->>'is_oem')::boolean = true THEN 'OEM'
+          WHEN (li.item_data->>'is_aftermarket')::boolean = true THEN 'Aftermarket'
+          WHEN (li.item_data->>'is_used')::boolean = true THEN 'Used/Salvage'
+          WHEN (li.item_data->>'is_remanufactured')::boolean = true THEN 'Remanufactured'
+          ELSE 'Unspecified'
+        END AS quality_type,
+        COUNT(*)::int AS cnt,
+        SUM(li.total_price_cents) / 100.0 AS total_cost
+      FROM parsed_invoice_line_items li
+      JOIN parsed_invoices pi ON li.parsed_invoice_id = pi.id
+      WHERE pi.fleet_id = ${fleetId}
+        AND (pi.invoice_date >= ${since} OR pi.invoice_date IS NULL)
+        AND li.item_type = 'part'
+      GROUP BY quality_type
+    )
+    SELECT quality_type, cnt AS count, total_cost,
+           ROUND(100.0 * cnt / NULLIF(SUM(cnt) OVER (), 0), 1) AS pct
+    FROM parts_mix
+    ORDER BY total_cost DESC
+  `;
+}
+
+// ── Spend Velocity ──────────────────────────────────────────────────────────
+
+export async function getSpendVelocity(fleetId: number, since: Date) {
+  return prisma.$queryRaw<{
+    period: string;
+    total: number;
+    invoice_count: number;
+    mom_change_pct: number | null;
+  }[]>`
+    WITH monthly AS (
+      SELECT
+        TO_CHAR(invoice_date, 'YYYY-MM') AS period,
+        SUM(grand_total_cents) / 100.0 AS total,
+        COUNT(*)::int AS invoice_count
+      FROM parsed_invoices
+      WHERE fleet_id = ${fleetId}
+        AND invoice_date >= ${since}
+        AND parse_status = 'completed'
+      GROUP BY period
+    )
+    SELECT
+      period,
+      total,
+      invoice_count,
+      ROUND(
+        100.0 * (total - LAG(total) OVER (ORDER BY period)) / NULLIF(LAG(total) OVER (ORDER BY period), 0),
+        1
+      ) AS mom_change_pct
+    FROM monthly
+    ORDER BY period
+  `;
+}
+
 // ── Summary stats ──────────────────────────────────────────────────────────
 
 export async function getFleetSummary(fleetId: number, since: Date) {
   const result = await prisma.parsedInvoice.aggregate({
-    where: { fleetId, invoiceDate: { gte: since }, parseStatus: 'completed' },
+    where: {
+      fleetId,
+      OR: [{ invoiceDate: { gte: since } }, { invoiceDate: null }],
+      parseStatus: 'completed',
+    },
     _sum: { grandTotalCents: true, laborTotalCents: true, partsTotalCents: true },
     _count: { id: true },
     _avg: { grandTotalCents: true },
@@ -325,12 +458,20 @@ export async function getFleetSummary(fleetId: number, since: Date) {
 
   const shops = await prisma.parsedInvoice.groupBy({
     by: ['pdfShopName'],
-    where: { fleetId, invoiceDate: { gte: since }, parseStatus: 'completed' },
+    where: {
+      fleetId,
+      OR: [{ invoiceDate: { gte: since } }, { invoiceDate: null }],
+      parseStatus: 'completed',
+    },
   });
 
   const vehicles = await prisma.parsedInvoice.groupBy({
     by: ['pdfVin'],
-    where: { fleetId, invoiceDate: { gte: since }, parseStatus: 'completed' },
+    where: {
+      fleetId,
+      OR: [{ invoiceDate: { gte: since } }, { invoiceDate: null }],
+      parseStatus: 'completed',
+    },
   });
 
   return {

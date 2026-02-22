@@ -14,6 +14,10 @@ import {
   getAnomalies,
   getVehicleRepairFrequency,
   getFleetSummary,
+  getVehicleMultipleVisits,
+  getShopTurnaround,
+  getPartsQualityMix,
+  getSpendVelocity,
 } from '../metrics/metrics';
 
 import { findSimilarInvoices } from './vectorRetriever';
@@ -70,27 +74,38 @@ export async function generateAndCacheInsights(
   logger.info('Generating insights', { fleetId, period, since: startDate });
 
   // 1. Gather fleet-level metrics in parallel
-  const [summary, spendByShop, monthlySpend, laborRates, topParts, costBreakdown, anomalies, vehicles] =
-    await Promise.all([
-      getFleetSummary(fleetId, since).catch(() => null),
-      getSpendByShop(fleetId, since).catch(() => []),
-      getMonthlySpend(fleetId, since).catch(() => []),
-      getAvgLaborRateByShop(fleetId, since).catch(() => []),
-      getTopReplacedParts(fleetId, since, 10).catch(() => []),
-      getCostBreakdown(fleetId, since).catch(() => []),
-      getAnomalies(fleetId, since).catch(() => []),
-      getVehicleRepairFrequency(fleetId, since).catch(() => []),
-    ]);
+  const [
+    summary, spendByShop, monthlySpend, laborRates, topParts,
+    costBreakdown, anomalies, vehicles,
+    multipleVisits, turnaround, partsQuality, spendVelocity,
+  ] = await Promise.all([
+    getFleetSummary(fleetId, since).catch(() => null),
+    getSpendByShop(fleetId, since).catch(() => []),
+    getMonthlySpend(fleetId, since).catch(() => []),
+    getAvgLaborRateByShop(fleetId, since).catch(() => []),
+    getTopReplacedParts(fleetId, since, 10).catch(() => []),
+    getCostBreakdown(fleetId, since).catch(() => []),
+    getAnomalies(fleetId, since).catch(() => []),
+    getVehicleRepairFrequency(fleetId, since).catch(() => []),
+    getVehicleMultipleVisits(fleetId, since).catch(() => []),
+    getShopTurnaround(fleetId, since).catch(() => []),
+    getPartsQualityMix(fleetId, since).catch(() => []),
+    getSpendVelocity(fleetId, since).catch(() => []),
+  ]);
 
   const metricsJson = JSON.stringify({
     summary,
     spend_by_shop: spendByShop,
     monthly_spend: monthlySpend,
+    spend_velocity_mom: spendVelocity,
     labor_rates_by_shop: laborRates,
     top_replaced_parts: topParts,
     cost_breakdown: costBreakdown,
+    parts_quality_mix: partsQuality,
     anomalies: anomalies.slice(0, 10),
     vehicle_repair_frequency: vehicles.slice(0, 10),
+    vehicles_with_multiple_visits: multipleVisits,
+    shop_turnaround_days: turnaround,
   }, null, 2);
 
   // 2. pgvector: retrieve relevant repair context
